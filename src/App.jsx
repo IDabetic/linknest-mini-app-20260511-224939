@@ -12,6 +12,23 @@ import { isLikelyUrl, slugify, stripAtPrefix } from "./lib/utils";
 
 const DEMO_DB_KEY = "linknest_demo_v1";
 const DEMO_SESSION_KEY = "linknest_demo_session_v1";
+const ADMIN_EMAILS = String(import.meta.env.VITE_ADMIN_EMAILS || "")
+  .split(",")
+  .map((email) => email.trim().toLowerCase())
+  .filter(Boolean);
+
+function isConfiguredAdminEmail(email) {
+  if (!email) return false;
+  return ADMIN_EMAILS.includes(String(email).toLowerCase());
+}
+
+function isSessionAdmin(session, useDemoMode) {
+  if (!session?.user) return false;
+  if (useDemoMode) {
+    return Boolean(session.user.is_admin);
+  }
+  return isConfiguredAdminEmail(session.user.email);
+}
 
 function readDemoDb() {
   try {
@@ -68,7 +85,8 @@ function demoGetSession() {
   return {
     user: {
       id: user.id,
-      email: user.email
+      email: user.email,
+      is_admin: Boolean(user.is_admin)
     }
   };
 }
@@ -81,10 +99,12 @@ function demoSignUp(email, password) {
     throw new Error("Korisnik je vec registrovan.");
   }
 
+  const shouldBeAdmin = db.users.length === 0;
   const user = {
     id: generateId(),
     email: cleanEmail,
-    password
+    password,
+    is_admin: shouldBeAdmin
   };
 
   db.users.push(user);
@@ -94,7 +114,8 @@ function demoSignUp(email, password) {
   return {
     user: {
       id: user.id,
-      email: user.email
+      email: user.email,
+      is_admin: Boolean(user.is_admin)
     }
   };
 }
@@ -113,7 +134,8 @@ function demoSignIn(email, password) {
   return {
     user: {
       id: user.id,
-      email: user.email
+      email: user.email,
+      is_admin: Boolean(user.is_admin)
     }
   };
 }
@@ -259,6 +281,52 @@ function demoGetPublicProfile(slug) {
   };
 }
 
+function demoListAdminRows() {
+  const db = readDemoDb();
+  const linkCountByUserId = db.links.reduce((acc, link) => {
+    const key = link.user_id;
+    acc[key] = (acc[key] || 0) + 1;
+    return acc;
+  }, {});
+
+  return db.users
+    .map((user) => {
+      const profile = db.profiles.find((row) => row.user_id === user.id);
+      return {
+        user_id: user.id,
+        email: user.email,
+        is_admin: Boolean(user.is_admin),
+        slug: profile?.slug || "",
+        display_name: profile?.display_name || "",
+        bio: profile?.bio || "",
+        links_count: linkCountByUserId[user.id] || 0
+      };
+    })
+    .sort((a, b) => a.email.localeCompare(b.email));
+}
+
+function demoDeleteUserAsAdmin(targetUserId) {
+  const db = readDemoDb();
+  const target = db.users.find((user) => user.id === targetUserId);
+  if (!target) {
+    throw new Error("Korisnik nije pronadjen.");
+  }
+
+  db.users = db.users.filter((user) => user.id !== targetUserId);
+  db.profiles = db.profiles.filter((profile) => profile.user_id !== targetUserId);
+  db.links = db.links.filter((link) => link.user_id !== targetUserId);
+
+  // Always keep at least one admin in demo mode.
+  if (db.users.length > 0 && !db.users.some((user) => user.is_admin)) {
+    db.users[0].is_admin = true;
+  }
+
+  writeDemoDb(db);
+  if (localStorage.getItem(DEMO_SESSION_KEY) === targetUserId) {
+    localStorage.removeItem(DEMO_SESSION_KEY);
+  }
+}
+
 function App() {
   const useDemoMode = !hasSupabaseEnv;
   const [session, setSession] = useState(null);
@@ -306,6 +374,8 @@ function App() {
     return <CenterNotice title="Ucitavanje" message="Pokrecem aplikaciju..." />;
   }
 
+  const isAdmin = isSessionAdmin(session, useDemoMode);
+
   return (
     <Routes>
       <Route
@@ -313,6 +383,7 @@ function App() {
         element={
           <LandingPage
             session={session}
+            isAdmin={isAdmin}
             useDemoMode={useDemoMode}
             onSessionChange={setSession}
             onSignOut={handleSignOut}
@@ -325,9 +396,28 @@ function App() {
           session ? (
             <DashboardPage
               user={session.user}
+              isAdmin={isAdmin}
               useDemoMode={useDemoMode}
               onSignOut={handleSignOut}
             />
+          ) : (
+            <Navigate to="/" replace />
+          )
+        }
+      />
+      <Route
+        path="/admin"
+        element={
+          session ? (
+            isAdmin ? (
+              <AdminPage
+                currentUser={session.user}
+                useDemoMode={useDemoMode}
+                onForceSignOut={handleSignOut}
+              />
+            ) : (
+              <Navigate to="/dashboard" replace />
+            )
           ) : (
             <Navigate to="/" replace />
           )
@@ -339,7 +429,7 @@ function App() {
   );
 }
 
-function LandingPage({ session, useDemoMode, onSessionChange, onSignOut }) {
+function LandingPage({ session, isAdmin, useDemoMode, onSessionChange, onSignOut }) {
   return (
     <div className="page">
       <div className="bg-orb bg-orb-a" aria-hidden="true" />
@@ -366,6 +456,11 @@ function LandingPage({ session, useDemoMode, onSessionChange, onSignOut }) {
               <Link className="btn btn-solid" to="/dashboard">
                 Otvori dashboard
               </Link>
+              {isAdmin ? (
+                <Link className="btn btn-outline" to="/admin">
+                  Admin panel
+                </Link>
+              ) : null}
               <button className="btn btn-outline" type="button" onClick={onSignOut}>
                 Odjavi se
               </button>
@@ -516,7 +611,7 @@ function AuthCard({ useDemoMode, onSessionChange }) {
   );
 }
 
-function DashboardPage({ user, useDemoMode, onSignOut }) {
+function DashboardPage({ user, isAdmin, useDemoMode, onSignOut }) {
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState("");
   const [profile, setProfile] = useState({
@@ -850,6 +945,11 @@ function DashboardPage({ user, useDemoMode, onSignOut }) {
               <Link className="btn btn-outline" to="/">
                 Pocetna
               </Link>
+              {isAdmin ? (
+                <Link className="btn btn-outline" to="/admin">
+                  Admin panel
+                </Link>
+              ) : null}
               <button className="btn btn-outline" type="button" onClick={onSignOut}>
                 Odjavi se
               </button>
@@ -994,6 +1094,204 @@ function DashboardPage({ user, useDemoMode, onSignOut }) {
               ))}
             </div>
           )}
+
+          {notice ? <p className="form-message">{notice}</p> : null}
+        </section>
+      </main>
+    </div>
+  );
+}
+
+function AdminPage({ currentUser, useDemoMode, onForceSignOut }) {
+  const [loading, setLoading] = useState(true);
+  const [notice, setNotice] = useState("");
+  const [query, setQuery] = useState("");
+  const [rows, setRows] = useState([]);
+  const [deletingUserId, setDeletingUserId] = useState("");
+
+  useEffect(() => {
+    loadAdminData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [useDemoMode]);
+
+  async function loadAdminData() {
+    setLoading(true);
+    setNotice("");
+
+    try {
+      if (useDemoMode) {
+        setRows(demoListAdminRows());
+      } else {
+        const { data: profiles, error: profilesError } = await supabase
+          .from("profiles")
+          .select("user_id, slug, display_name, bio");
+
+        if (profilesError) {
+          throw profilesError;
+        }
+
+        const { data: links, error: linksError } = await supabase
+          .from("links")
+          .select("id, user_id");
+
+        if (linksError) {
+          throw linksError;
+        }
+
+        const linkCountByUserId = (links || []).reduce((acc, link) => {
+          const key = link.user_id;
+          acc[key] = (acc[key] || 0) + 1;
+          return acc;
+        }, {});
+
+        const mapped = (profiles || [])
+          .map((profile) => ({
+            user_id: profile.user_id,
+            email: "",
+            is_admin: false,
+            slug: profile.slug || "",
+            display_name: profile.display_name || "",
+            bio: profile.bio || "",
+            links_count: linkCountByUserId[profile.user_id] || 0
+          }))
+          .sort((a, b) => (a.slug || "").localeCompare(b.slug || ""));
+
+        setRows(mapped);
+      }
+    } catch (error) {
+      setNotice(error.message || "Nije moguce ucitati admin podatke.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function deleteUser(userId) {
+    if (!useDemoMode) return;
+
+    const yes = window.confirm("Da li sigurno zelis da obrises korisnika i sve njegove linkove?");
+    if (!yes) return;
+
+    setDeletingUserId(userId);
+    setNotice("");
+    try {
+      demoDeleteUserAsAdmin(userId);
+      const refreshed = demoListAdminRows();
+      setRows(refreshed);
+      setNotice("Korisnik je obrisan.");
+
+      if (userId === currentUser.id) {
+        await onForceSignOut();
+      }
+    } catch (error) {
+      setNotice(error.message || "Nije moguce obrisati korisnika.");
+    } finally {
+      setDeletingUserId("");
+    }
+  }
+
+  const filteredRows = rows.filter((row) => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return true;
+    return [row.display_name, row.slug, row.email, row.user_id]
+      .join(" ")
+      .toLowerCase()
+      .includes(needle);
+  });
+
+  const totalUsers = rows.length;
+  const totalLinks = rows.reduce((sum, row) => sum + row.links_count, 0);
+  const totalAdmins = rows.filter((row) => row.is_admin).length;
+
+  if (loading) {
+    return <CenterNotice title="Ucitavanje admin panela" message="Pripremam podatke..." />;
+  }
+
+  return (
+    <div className="page">
+      <main className="layout dashboard-layout">
+        <section className="panel">
+          <div className="panel-head">
+            <div>
+              <p className="eyebrow">Admin</p>
+              <h2>Admin panel</h2>
+            </div>
+            <div className="actions-inline">
+              <Link className="btn btn-outline" to="/">
+                Pocetna
+              </Link>
+              <Link className="btn btn-outline" to="/dashboard">
+                Dashboard
+              </Link>
+            </div>
+          </div>
+
+          <div className="admin-stats">
+            <article className="stat-card">
+              <strong>{totalUsers}</strong>
+              <span>Korisnika</span>
+            </article>
+            <article className="stat-card">
+              <strong>{totalLinks}</strong>
+              <span>Ukupno linkova</span>
+            </article>
+            <article className="stat-card">
+              <strong>{useDemoMode ? totalAdmins : "-"}</strong>
+              <span>Admin naloga</span>
+            </article>
+          </div>
+
+          <label>
+            Pretraga korisnika
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Ime, slug, email ili user id"
+            />
+          </label>
+
+          {!useDemoMode ? (
+            <p className="form-message">
+              Trenutno je ukljucen read-only admin pregled. Za brisanje ili menjanje drugih korisnika
+              potreban je serverski endpoint sa service-role privilegijama.
+            </p>
+          ) : null}
+
+          <div className="admin-list">
+            {filteredRows.length === 0 ? (
+              <p className="empty-state">Nema rezultata za unetu pretragu.</p>
+            ) : (
+              filteredRows.map((row) => (
+                <article className="link-editor-card" key={row.user_id}>
+                  <div className="admin-row-head">
+                    <strong>{row.display_name || "(bez imena)"}</strong>
+                    {row.is_admin ? <span className="admin-badge">ADMIN</span> : null}
+                  </div>
+                  {row.email ? <p className="admin-meta">{row.email}</p> : null}
+                  <p className="admin-meta">Slug: {row.slug || "-"}</p>
+                  <p className="admin-meta">User ID: {row.user_id}</p>
+                  <p className="admin-meta">Broj linkova: {row.links_count}</p>
+
+                  <div className="actions-inline">
+                    {row.slug ? (
+                      <Link className="btn btn-outline" to={`/u/${row.slug}`} target="_blank">
+                        Otvori javnu stranicu
+                      </Link>
+                    ) : null}
+                    {useDemoMode ? (
+                      <button
+                        type="button"
+                        className="btn btn-danger"
+                        disabled={deletingUserId === row.user_id}
+                        onClick={() => deleteUser(row.user_id)}
+                      >
+                        {deletingUserId === row.user_id ? "Brisem..." : "Obrisi korisnika"}
+                      </button>
+                    ) : null}
+                  </div>
+                </article>
+              ))
+            )}
+          </div>
 
           {notice ? <p className="form-message">{notice}</p> : null}
         </section>

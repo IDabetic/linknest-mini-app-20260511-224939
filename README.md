@@ -5,6 +5,7 @@ Ovo je pravi mini-SaaS:
 - korisnik kreira nalog
 - korisnik uredjuje svoj profil i linkove
 - javna stranica je dostupna na `/u/{slug}`
+- admin panel je dostupan na `/admin`
 
 ## Tech stack
 
@@ -30,6 +31,7 @@ npm run dev
 ```env
 VITE_SUPABASE_URL=...
 VITE_SUPABASE_ANON_KEY=...
+VITE_ADMIN_EMAILS=admin@tvojdomen.com,drugiadmin@tvojdomen.com
 ```
 
 ## 3) Kako app radi
@@ -40,6 +42,10 @@ VITE_SUPABASE_ANON_KEY=...
   - custom slug
   - dodavanje/izmena/brisanje/reorder linkova
 - Public page (`/u/:slug`): prikaz profila i linkova
+- Admin page (`/admin`):
+  - pregled svih korisnickih profila i broja linkova
+  - pretraga korisnika
+  - u demo rezimu i brisanje korisnika
 
 ## 4) Deploy na Vercel
 
@@ -51,3 +57,5 @@ VITE_SUPABASE_ANON_KEY=...
 ## Napomena
 
 Ako je u Supabase ukljucen Email Confirmation, korisnik posle sign-up treba da potvrdi email pa tek onda login.
+
+Ako `VITE_SUPABASE_*` varijable nisu podesene, app radi u demo rezimu (podaci ostaju samo u browseru).
