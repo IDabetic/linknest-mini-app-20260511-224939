@@ -12,38 +12,126 @@ import { isLikelyUrl, slugify, stripAtPrefix } from "./lib/utils";
 
 const DEMO_DB_KEY = "linknest_demo_v1";
 const DEMO_SESSION_KEY = "linknest_demo_session_v1";
+const MASTER_ADMIN_EMAILS = String(import.meta.env.VITE_MASTER_ADMIN_EMAILS || "")
+  .split(",")
+  .map((email) => email.trim().toLowerCase())
+  .filter(Boolean);
 const ADMIN_EMAILS = String(import.meta.env.VITE_ADMIN_EMAILS || "")
   .split(",")
   .map((email) => email.trim().toLowerCase())
   .filter(Boolean);
+const ALL_ADMIN_EMAILS = Array.from(new Set([...MASTER_ADMIN_EMAILS, ...ADMIN_EMAILS]));
+const PLAN_OPTIONS = ["free", "starter", "pro", "premium"];
 
 function isConfiguredAdminEmail(email) {
   if (!email) return false;
-  return ADMIN_EMAILS.includes(String(email).toLowerCase());
+  return ALL_ADMIN_EMAILS.includes(String(email).toLowerCase());
 }
 
 function isSessionAdmin(session, useDemoMode) {
   if (!session?.user) return false;
   if (useDemoMode) {
-    return Boolean(session.user.is_admin);
+    return session.user.role === "master_admin";
   }
-  return isConfiguredAdminEmail(session.user.email);
+  return isConfiguredAdminEmail(session.user.email) || session.user.role === "master_admin";
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function toDateKey(input) {
+  const date = new Date(input);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toISOString().slice(0, 10);
+}
+
+function lastNDaysKeys(days) {
+  const keys = [];
+  const today = new Date();
+  for (let i = days - 1; i >= 0; i -= 1) {
+    const copy = new Date(today);
+    copy.setDate(today.getDate() - i);
+    keys.push(toDateKey(copy));
+  }
+  return keys;
+}
+
+function toPrettyDate(key) {
+  if (!key) return "";
+  const date = new Date(`${key}T00:00:00Z`);
+  return new Intl.DateTimeFormat("sr-RS", { day: "2-digit", month: "2-digit" }).format(date);
+}
+
+function buildAnalyticsSummary(events, links) {
+  const safeEvents = Array.isArray(events) ? events : [];
+  const safeLinks = Array.isArray(links) ? links : [];
+  const views = safeEvents.filter((event) => event.event_type === "view").length;
+  const clicks = safeEvents.filter((event) => event.event_type === "click").length;
+  const ctr = views > 0 ? (clicks / views) * 100 : 0;
+
+  const clicksByLinkId = safeEvents.reduce((acc, event) => {
+    if (event.event_type !== "click" || !event.link_id) return acc;
+    acc[event.link_id] = (acc[event.link_id] || 0) + 1;
+    return acc;
+  }, {});
+
+  const topLinks = safeLinks
+    .map((link) => ({
+      id: link.id,
+      title: link.title || "Bez naslova",
+      url: link.url || "",
+      clicks: clicksByLinkId[link.id] || 0
+    }))
+    .sort((a, b) => b.clicks - a.clicks)
+    .slice(0, 5);
+
+  const range = lastNDaysKeys(7);
+  const dailyMap = range.reduce((acc, key) => {
+    acc[key] = { date: key, views: 0, clicks: 0 };
+    return acc;
+  }, {});
+
+  safeEvents.forEach((event) => {
+    const key = toDateKey(event.created_at);
+    if (!dailyMap[key]) return;
+    if (event.event_type === "view") dailyMap[key].views += 1;
+    if (event.event_type === "click") dailyMap[key].clicks += 1;
+  });
+
+  const daily = range.map((key) => ({
+    ...dailyMap[key],
+    label: toPrettyDate(key)
+  }));
+
+  return {
+    views,
+    clicks,
+    ctr,
+    topLinks,
+    daily
+  };
+}
+
+function createDefaultDemoDb() {
+  return { users: [], profiles: [], links: [], events: [] };
 }
 
 function readDemoDb() {
   try {
     const raw = localStorage.getItem(DEMO_DB_KEY);
     if (!raw) {
-      return { users: [], profiles: [], links: [] };
+      return createDefaultDemoDb();
     }
     const parsed = JSON.parse(raw);
     return {
       users: Array.isArray(parsed.users) ? parsed.users : [],
       profiles: Array.isArray(parsed.profiles) ? parsed.profiles : [],
-      links: Array.isArray(parsed.links) ? parsed.links : []
+      links: Array.isArray(parsed.links) ? parsed.links : [],
+      events: Array.isArray(parsed.events) ? parsed.events : []
     };
   } catch {
-    return { users: [], profiles: [], links: [] };
+    return createDefaultDemoDb();
   }
 }
 
@@ -86,7 +174,9 @@ function demoGetSession() {
     user: {
       id: user.id,
       email: user.email,
-      is_admin: Boolean(user.is_admin)
+      role: user.role || "user",
+      status: user.status || "active",
+      plan: user.plan || "free"
     }
   };
 }
@@ -99,12 +189,15 @@ function demoSignUp(email, password) {
     throw new Error("Korisnik je vec registrovan.");
   }
 
-  const shouldBeAdmin = db.users.length === 0;
+  const shouldBeMasterAdmin = db.users.length === 0 || isConfiguredAdminEmail(cleanEmail);
   const user = {
     id: generateId(),
     email: cleanEmail,
     password,
-    is_admin: shouldBeAdmin
+    role: shouldBeMasterAdmin ? "master_admin" : "user",
+    status: "active",
+    plan: "free",
+    created_at: nowIso()
   };
 
   db.users.push(user);
@@ -115,7 +208,9 @@ function demoSignUp(email, password) {
     user: {
       id: user.id,
       email: user.email,
-      is_admin: Boolean(user.is_admin)
+      role: user.role,
+      status: user.status,
+      plan: user.plan
     }
   };
 }
@@ -128,6 +223,9 @@ function demoSignIn(email, password) {
   if (!user) {
     throw new Error("Neispravni podaci za prijavu.");
   }
+  if (user.status === "suspended") {
+    throw new Error("Nalog je suspendovan. Kontaktiraj administratora.");
+  }
 
   localStorage.setItem(DEMO_SESSION_KEY, user.id);
 
@@ -135,7 +233,9 @@ function demoSignIn(email, password) {
     user: {
       id: user.id,
       email: user.email,
-      is_admin: Boolean(user.is_admin)
+      role: user.role || "user",
+      status: user.status || "active",
+      plan: user.plan || "free"
     }
   };
 }
@@ -147,15 +247,23 @@ function demoSignOut() {
 function demoEnsureProfile(user) {
   const db = readDemoDb();
   const existing = db.profiles.find((profile) => profile.user_id === user.id);
-  if (existing) return existing;
+  if (existing) {
+    return existing;
+  }
 
   const base = slugify(stripAtPrefix(user.email)) || "creator";
   const profile = {
     user_id: user.id,
+    email: user.email,
     slug: getUniqueSlug(base, db.profiles),
     display_name: stripAtPrefix(user.email),
     bio: "",
-    avatar_url: ""
+    avatar_url: "",
+    role: user.role || "user",
+    status: user.status || "active",
+    plan: user.plan || "free",
+    created_at: nowIso(),
+    updated_at: nowIso()
   };
 
   db.profiles.push(profile);
@@ -188,7 +296,8 @@ function demoUpdateProfile(userId, payload) {
     slug: cleanSlug,
     display_name: payload.display_name.trim(),
     bio: payload.bio.trim(),
-    avatar_url: payload.avatar_url.trim()
+    avatar_url: payload.avatar_url.trim(),
+    updated_at: nowIso()
   };
 
   db.profiles[index] = next;
@@ -269,6 +378,7 @@ function demoGetPublicProfile(slug) {
   const db = readDemoDb();
   const profile = db.profiles.find((row) => row.slug === slug);
   if (!profile) return null;
+  if (profile.status === "suspended") return null;
 
   const links = db.links
     .filter((link) => link.user_id === profile.user_id)
@@ -281,28 +391,135 @@ function demoGetPublicProfile(slug) {
   };
 }
 
+function demoRecordEvent({ ownerUserId, eventType, linkId = null, sourceSlug = "" }) {
+  const db = readDemoDb();
+  db.events.push({
+    id: generateId(),
+    owner_user_id: ownerUserId,
+    event_type: eventType,
+    link_id: linkId,
+    source_slug: sourceSlug || "",
+    created_at: nowIso()
+  });
+  writeDemoDb(db);
+}
+
+function demoRecordProfileView(ownerUserId, sourceSlug) {
+  demoRecordEvent({ ownerUserId, eventType: "view", sourceSlug });
+}
+
+function demoRecordLinkClick(ownerUserId, linkId, sourceSlug) {
+  demoRecordEvent({ ownerUserId, eventType: "click", linkId, sourceSlug });
+}
+
+function demoGetUserAnalytics(userId) {
+  const db = readDemoDb();
+  const events = db.events.filter((event) => event.owner_user_id === userId);
+  const links = db.links.filter((link) => link.user_id === userId);
+  return buildAnalyticsSummary(events, links);
+}
+
+function demoGetGlobalAnalytics() {
+  const db = readDemoDb();
+  return buildAnalyticsSummary(db.events, db.links);
+}
+
 function demoListAdminRows() {
   const db = readDemoDb();
-  const linkCountByUserId = db.links.reduce((acc, link) => {
+  const linksByUserId = db.links.reduce((acc, link) => {
     const key = link.user_id;
-    acc[key] = (acc[key] || 0) + 1;
+    acc[key] = acc[key] || [];
+    acc[key].push(link);
+    return acc;
+  }, {});
+  const eventsByUserId = db.events.reduce((acc, event) => {
+    const key = event.owner_user_id;
+    acc[key] = acc[key] || [];
+    acc[key].push(event);
     return acc;
   }, {});
 
   return db.users
     .map((user) => {
       const profile = db.profiles.find((row) => row.user_id === user.id);
+      const userLinks = linksByUserId[user.id] || [];
+      const userEvents = eventsByUserId[user.id] || [];
+      const analytics = buildAnalyticsSummary(userEvents, userLinks);
       return {
         user_id: user.id,
         email: user.email,
-        is_admin: Boolean(user.is_admin),
+        role: user.role || "user",
+        status: user.status || "active",
+        plan: user.plan || "free",
         slug: profile?.slug || "",
         display_name: profile?.display_name || "",
         bio: profile?.bio || "",
-        links_count: linkCountByUserId[user.id] || 0
+        links_count: userLinks.length,
+        views: analytics.views,
+        clicks: analytics.clicks,
+        ctr: analytics.ctr
       };
     })
     .sort((a, b) => a.email.localeCompare(b.email));
+}
+
+function demoUpdateUserMetaAsAdmin(targetUserId, patch) {
+  const db = readDemoDb();
+  const userIndex = db.users.findIndex((user) => user.id === targetUserId);
+  const profileIndex = db.profiles.findIndex((profile) => profile.user_id === targetUserId);
+
+  if (userIndex === -1) {
+    throw new Error("Korisnik nije pronadjen.");
+  }
+
+  const nextRole = patch.role || db.users[userIndex].role || "user";
+  const nextStatus = patch.status || db.users[userIndex].status || "active";
+  const nextPlan = patch.plan || db.users[userIndex].plan || "free";
+
+  if (!PLAN_OPTIONS.includes(nextPlan)) {
+    throw new Error("Nepoznat plan.");
+  }
+  if (!["user", "master_admin"].includes(nextRole)) {
+    throw new Error("Nepoznata rola.");
+  }
+  if (!["active", "suspended"].includes(nextStatus)) {
+    throw new Error("Nepoznat status.");
+  }
+
+  const currentMasterAdmins = db.users.filter((user) => user.role === "master_admin").length;
+  if (
+    db.users[userIndex].role === "master_admin" &&
+    nextRole !== "master_admin" &&
+    currentMasterAdmins <= 1
+  ) {
+    throw new Error("Mora postojati bar jedan master admin.");
+  }
+
+  db.users[userIndex] = {
+    ...db.users[userIndex],
+    role: nextRole,
+    status: nextStatus,
+    plan: nextPlan
+  };
+
+  if (profileIndex !== -1) {
+    db.profiles[profileIndex] = {
+      ...db.profiles[profileIndex],
+      role: nextRole,
+      status: nextStatus,
+      plan: nextPlan,
+      updated_at: nowIso()
+    };
+  }
+
+  writeDemoDb(db);
+}
+
+function demoClearUserContentAsAdmin(targetUserId) {
+  const db = readDemoDb();
+  db.links = db.links.filter((link) => link.user_id !== targetUserId);
+  db.events = db.events.filter((event) => event.owner_user_id !== targetUserId);
+  writeDemoDb(db);
 }
 
 function demoDeleteUserAsAdmin(targetUserId) {
@@ -312,13 +529,19 @@ function demoDeleteUserAsAdmin(targetUserId) {
     throw new Error("Korisnik nije pronadjen.");
   }
 
+  const currentMasterAdmins = db.users.filter((user) => user.role === "master_admin").length;
+  if (target.role === "master_admin" && currentMasterAdmins <= 1) {
+    throw new Error("Mora postojati bar jedan master admin.");
+  }
+
   db.users = db.users.filter((user) => user.id !== targetUserId);
   db.profiles = db.profiles.filter((profile) => profile.user_id !== targetUserId);
   db.links = db.links.filter((link) => link.user_id !== targetUserId);
+  db.events = db.events.filter((event) => event.owner_user_id !== targetUserId);
 
   // Always keep at least one admin in demo mode.
-  if (db.users.length > 0 && !db.users.some((user) => user.is_admin)) {
-    db.users[0].is_admin = true;
+  if (db.users.length > 0 && !db.users.some((user) => user.role === "master_admin")) {
+    db.users[0].role = "master_admin";
   }
 
   writeDemoDb(db);
@@ -332,6 +555,53 @@ function App() {
   const [session, setSession] = useState(null);
   const [booting, setBooting] = useState(true);
 
+  async function enrichSupabaseSession(baseSession) {
+    if (!baseSession?.user) return null;
+
+    const email = baseSession.user.email || "";
+    const fallbackRole = isConfiguredAdminEmail(email) ? "master_admin" : "user";
+
+    try {
+      const { data, error } = await supabase
+        .from("profiles")
+        .select("role, status, plan")
+        .eq("user_id", baseSession.user.id)
+        .maybeSingle();
+
+      if (error) {
+        return {
+          ...baseSession,
+          user: {
+            ...baseSession.user,
+            role: fallbackRole,
+            status: "active",
+            plan: "free"
+          }
+        };
+      }
+
+      return {
+        ...baseSession,
+        user: {
+          ...baseSession.user,
+          role: data?.role || fallbackRole,
+          status: data?.status || "active",
+          plan: data?.plan || "free"
+        }
+      };
+    } catch {
+      return {
+        ...baseSession,
+        user: {
+          ...baseSession.user,
+          role: fallbackRole,
+          status: "active",
+          plan: "free"
+        }
+      };
+    }
+  }
+
   useEffect(() => {
     if (useDemoMode) {
       setSession(demoGetSession());
@@ -341,16 +611,20 @@ function App() {
 
     let mounted = true;
 
-    supabase.auth.getSession().then(({ data }) => {
+    supabase.auth.getSession().then(async ({ data }) => {
       if (!mounted) return;
-      setSession(data.session ?? null);
+      const enriched = await enrichSupabaseSession(data.session ?? null);
+      if (!mounted) return;
+      setSession(enriched);
       setBooting(false);
     });
 
     const {
       data: { subscription }
     } = supabase.auth.onAuthStateChange((_event, nextSession) => {
-      setSession(nextSession);
+      enrichSupabaseSession(nextSession).then((enriched) => {
+        setSession(enriched);
+      });
     });
 
     return () => {
@@ -532,7 +806,15 @@ function AuthCard({ useDemoMode, onSessionChange }) {
       }
 
       if (data.session) {
-        onSessionChange(data.session);
+        onSessionChange({
+          ...data.session,
+          user: {
+            ...data.session.user,
+            role: isConfiguredAdminEmail(cleanEmail) ? "master_admin" : "user",
+            status: "active",
+            plan: "free"
+          }
+        });
         navigate("/dashboard");
         setLoading(false);
         return;
@@ -554,7 +836,19 @@ function AuthCard({ useDemoMode, onSessionChange }) {
       return;
     }
 
-    onSessionChange(data.session ?? null);
+    onSessionChange(
+      data.session
+        ? {
+            ...data.session,
+            user: {
+              ...data.session.user,
+              role: isConfiguredAdminEmail(cleanEmail) ? "master_admin" : "user",
+              status: "active",
+              plan: "free"
+            }
+          }
+        : null
+    );
     navigate("/dashboard");
     setLoading(false);
   }
@@ -615,12 +909,17 @@ function DashboardPage({ user, isAdmin, useDemoMode, onSignOut }) {
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState("");
   const [profile, setProfile] = useState({
+    email: "",
     slug: "",
     display_name: "",
     bio: "",
-    avatar_url: ""
+    avatar_url: "",
+    role: "user",
+    status: "active",
+    plan: "free"
   });
   const [links, setLinks] = useState([]);
+  const [analytics, setAnalytics] = useState({ views: 0, clicks: 0, ctr: 0, topLinks: [], daily: [] });
   const [savingProfile, setSavingProfile] = useState(false);
   const [savingLinks, setSavingLinks] = useState(false);
 
@@ -641,7 +940,7 @@ function DashboardPage({ user, isAdmin, useDemoMode, onSignOut }) {
 
     const { data: existing, error: existingError } = await supabase
       .from("profiles")
-      .select("user_id, slug, display_name, bio, avatar_url")
+      .select("user_id, email, slug, display_name, bio, avatar_url, role, status, plan")
       .eq("user_id", user.id)
       .maybeSingle();
 
@@ -655,17 +954,22 @@ function DashboardPage({ user, isAdmin, useDemoMode, onSignOut }) {
 
     const base = slugify(stripAtPrefix(user.email)) || "creator";
     const fallbackSlug = `${base}-${user.id.slice(0, 6)}`;
+    const fallbackRole = isConfiguredAdminEmail(user.email) ? "master_admin" : "user";
 
     const { data: created, error: createError } = await supabase
       .from("profiles")
       .insert({
         user_id: user.id,
+        email: user.email || "",
         slug: fallbackSlug,
         display_name: stripAtPrefix(user.email),
         bio: "",
-        avatar_url: ""
+        avatar_url: "",
+        role: fallbackRole,
+        status: "active",
+        plan: "free"
       })
-      .select("user_id, slug, display_name, bio, avatar_url")
+      .select("user_id, email, slug, display_name, bio, avatar_url, role, status, plan")
       .single();
 
     if (createError) {
@@ -673,6 +977,25 @@ function DashboardPage({ user, isAdmin, useDemoMode, onSignOut }) {
     }
 
     return created;
+  }
+
+  async function refreshAnalytics(optionalLinks) {
+    if (useDemoMode) {
+      setAnalytics(demoGetUserAnalytics(user.id));
+      return;
+    }
+
+    const { data: eventRows, error: eventsError } = await supabase
+      .from("analytics_events")
+      .select("id, owner_user_id, link_id, event_type, created_at")
+      .eq("owner_user_id", user.id);
+
+    if (eventsError) {
+      throw eventsError;
+    }
+
+    const activeLinks = optionalLinks || links;
+    setAnalytics(buildAnalyticsSummary(eventRows ?? [], activeLinks));
   }
 
   async function loadUserData() {
@@ -683,14 +1006,20 @@ function DashboardPage({ user, isAdmin, useDemoMode, onSignOut }) {
       const row = await ensureProfile();
 
       setProfile({
+        email: row.email ?? user.email ?? "",
         slug: row.slug ?? "",
         display_name: row.display_name ?? "",
         bio: row.bio ?? "",
-        avatar_url: row.avatar_url ?? ""
+        avatar_url: row.avatar_url ?? "",
+        role: row.role ?? (isConfiguredAdminEmail(user.email) ? "master_admin" : "user"),
+        status: row.status ?? "active",
+        plan: row.plan ?? "free"
       });
 
       if (useDemoMode) {
-        setLinks(demoListLinks(user.id));
+        const userLinks = demoListLinks(user.id);
+        setLinks(userLinks);
+        await refreshAnalytics(userLinks);
       } else {
         const { data: linkRows, error: linksError } = await supabase
           .from("links")
@@ -702,7 +1031,9 @@ function DashboardPage({ user, isAdmin, useDemoMode, onSignOut }) {
           throw linksError;
         }
 
-        setLinks(linkRows ?? []);
+        const safeLinks = linkRows ?? [];
+        setLinks(safeLinks);
+        await refreshAnalytics(safeLinks);
       }
     } catch (error) {
       setNotice(error.message || "Nije moguce ucitati dashboard podatke.");
@@ -733,12 +1064,13 @@ function DashboardPage({ user, isAdmin, useDemoMode, onSignOut }) {
     try {
       if (useDemoMode) {
         const next = demoUpdateProfile(user.id, payload);
-        setProfile({
+        setProfile((prev) => ({
+          ...prev,
           slug: next.slug,
           display_name: next.display_name,
           bio: next.bio,
           avatar_url: next.avatar_url
-        });
+        }));
       } else {
         const { error } = await supabase
           .from("profiles")
@@ -771,7 +1103,9 @@ function DashboardPage({ user, isAdmin, useDemoMode, onSignOut }) {
     try {
       if (useDemoMode) {
         const created = demoAddLink(user.id);
-        setLinks((prev) => [...prev, created]);
+        const nextLinks = [...links, created];
+        setLinks(nextLinks);
+        await refreshAnalytics(nextLinks);
       } else {
         const { data, error } = await supabase
           .from("links")
@@ -789,7 +1123,9 @@ function DashboardPage({ user, isAdmin, useDemoMode, onSignOut }) {
           throw error;
         }
 
-        setLinks((prev) => [...prev, data]);
+        const nextLinks = [...links, data];
+        setLinks(nextLinks);
+        await refreshAnalytics(nextLinks);
       }
     } catch (error) {
       setNotice(error.message || "Nije moguce dodati link.");
@@ -852,7 +1188,9 @@ function DashboardPage({ user, isAdmin, useDemoMode, onSignOut }) {
     try {
       if (useDemoMode) {
         demoDeleteLink(user.id, id);
-        setLinks(demoListLinks(user.id));
+        const nextLinks = demoListLinks(user.id);
+        setLinks(nextLinks);
+        await refreshAnalytics(nextLinks);
       } else {
         const { error } = await supabase.from("links").delete().eq("id", id).eq("user_id", user.id);
 
@@ -863,6 +1201,7 @@ function DashboardPage({ user, isAdmin, useDemoMode, onSignOut }) {
         const remaining = links.filter((link) => link.id !== id);
         setLinks(remaining);
         await normalizePositions(remaining);
+        await refreshAnalytics(remaining);
       }
     } catch (error) {
       setNotice(error.message || "Nije moguce obrisati link.");
@@ -940,6 +1279,9 @@ function DashboardPage({ user, isAdmin, useDemoMode, onSignOut }) {
             <div>
               <p className="eyebrow">Dashboard</p>
               <h2>Tvoj Link-in-Bio</h2>
+              <p className="admin-meta">
+                Plan: {profile.plan} | Rola: {profile.role} | Status: {profile.status}
+              </p>
             </div>
             <div className="actions-inline">
               <Link className="btn btn-outline" to="/">
@@ -1097,6 +1439,56 @@ function DashboardPage({ user, isAdmin, useDemoMode, onSignOut }) {
 
           {notice ? <p className="form-message">{notice}</p> : null}
         </section>
+
+        <section className="panel">
+          <div className="panel-head">
+            <h3>Analitika</h3>
+            <small className="admin-meta">Poslednjih 7 dana + ukupno</small>
+          </div>
+
+          <div className="admin-stats">
+            <article className="stat-card">
+              <strong>{analytics.views}</strong>
+              <span>Pregledi stranice</span>
+            </article>
+            <article className="stat-card">
+              <strong>{analytics.clicks}</strong>
+              <span>Klikovi na linkove</span>
+            </article>
+            <article className="stat-card">
+              <strong>{analytics.ctr.toFixed(1)}%</strong>
+              <span>CTR</span>
+            </article>
+          </div>
+
+          <div className="analytics-grid">
+            <article className="link-editor-card">
+              <h4>Top linkovi</h4>
+              {analytics.topLinks.length === 0 ? (
+                <p className="empty-state">Jos nema klikova.</p>
+              ) : (
+                <div className="analytics-list">
+                  {analytics.topLinks.map((item) => (
+                    <p className="admin-meta" key={item.id}>
+                      <strong>{item.title}</strong>: {item.clicks} klikova
+                    </p>
+                  ))}
+                </div>
+              )}
+            </article>
+
+            <article className="link-editor-card">
+              <h4>Dnevni pregled</h4>
+              <div className="analytics-list">
+                {analytics.daily.map((day) => (
+                  <p className="admin-meta" key={day.date}>
+                    {day.label}: {day.views} pregleda / {day.clicks} klikova
+                  </p>
+                ))}
+              </div>
+            </article>
+          </div>
+        </section>
       </main>
     </div>
   );
@@ -1107,7 +1499,14 @@ function AdminPage({ currentUser, useDemoMode, onForceSignOut }) {
   const [notice, setNotice] = useState("");
   const [query, setQuery] = useState("");
   const [rows, setRows] = useState([]);
-  const [deletingUserId, setDeletingUserId] = useState("");
+  const [globalAnalytics, setGlobalAnalytics] = useState({
+    views: 0,
+    clicks: 0,
+    ctr: 0,
+    topLinks: [],
+    daily: []
+  });
+  const [busyUserId, setBusyUserId] = useState("");
 
   useEffect(() => {
     loadAdminData();
@@ -1121,42 +1520,59 @@ function AdminPage({ currentUser, useDemoMode, onForceSignOut }) {
     try {
       if (useDemoMode) {
         setRows(demoListAdminRows());
+        setGlobalAnalytics(demoGetGlobalAnalytics());
       } else {
         const { data: profiles, error: profilesError } = await supabase
           .from("profiles")
-          .select("user_id, slug, display_name, bio");
+          .select("user_id, email, slug, display_name, bio, role, status, plan");
 
-        if (profilesError) {
-          throw profilesError;
-        }
+        if (profilesError) throw profilesError;
 
-        const { data: links, error: linksError } = await supabase
-          .from("links")
-          .select("id, user_id");
+        const { data: links, error: linksError } = await supabase.from("links").select("id, user_id, title, url");
+        if (linksError) throw linksError;
 
-        if (linksError) {
-          throw linksError;
-        }
+        const { data: events, error: eventsError } = await supabase
+          .from("analytics_events")
+          .select("id, owner_user_id, link_id, event_type, created_at");
+        if (eventsError) throw eventsError;
 
-        const linkCountByUserId = (links || []).reduce((acc, link) => {
+        const linksByUserId = (links || []).reduce((acc, link) => {
           const key = link.user_id;
-          acc[key] = (acc[key] || 0) + 1;
+          acc[key] = acc[key] || [];
+          acc[key].push(link);
+          return acc;
+        }, {});
+        const eventsByUserId = (events || []).reduce((acc, event) => {
+          const key = event.owner_user_id;
+          acc[key] = acc[key] || [];
+          acc[key].push(event);
           return acc;
         }, {});
 
         const mapped = (profiles || [])
-          .map((profile) => ({
-            user_id: profile.user_id,
-            email: "",
-            is_admin: false,
-            slug: profile.slug || "",
-            display_name: profile.display_name || "",
-            bio: profile.bio || "",
-            links_count: linkCountByUserId[profile.user_id] || 0
-          }))
-          .sort((a, b) => (a.slug || "").localeCompare(b.slug || ""));
+          .map((profile) => {
+            const userLinks = linksByUserId[profile.user_id] || [];
+            const userEvents = eventsByUserId[profile.user_id] || [];
+            const analytics = buildAnalyticsSummary(userEvents, userLinks);
+            return {
+              user_id: profile.user_id,
+              email: profile.email || "",
+              role: profile.role || "user",
+              status: profile.status || "active",
+              plan: profile.plan || "free",
+              slug: profile.slug || "",
+              display_name: profile.display_name || "",
+              bio: profile.bio || "",
+              links_count: userLinks.length,
+              views: analytics.views,
+              clicks: analytics.clicks,
+              ctr: analytics.ctr
+            };
+          })
+          .sort((a, b) => (a.email || "").localeCompare(b.email || ""));
 
         setRows(mapped);
+        setGlobalAnalytics(buildAnalyticsSummary(events || [], links || []));
       }
     } catch (error) {
       setNotice(error.message || "Nije moguce ucitati admin podatke.");
@@ -1165,34 +1581,104 @@ function AdminPage({ currentUser, useDemoMode, onForceSignOut }) {
     }
   }
 
-  async function deleteUser(userId) {
-    if (!useDemoMode) return;
-
-    const yes = window.confirm("Da li sigurno zelis da obrises korisnika i sve njegove linkove?");
-    if (!yes) return;
-
-    setDeletingUserId(userId);
+  async function updateUserMeta(row, patch) {
+    setBusyUserId(row.user_id);
     setNotice("");
     try {
-      demoDeleteUserAsAdmin(userId);
-      const refreshed = demoListAdminRows();
-      setRows(refreshed);
-      setNotice("Korisnik je obrisan.");
+      if (useDemoMode) {
+        demoUpdateUserMetaAsAdmin(row.user_id, patch);
+      } else {
+        const payload = {};
+        if (patch.role) payload.role = patch.role;
+        if (patch.status) payload.status = patch.status;
+        if (patch.plan) payload.plan = patch.plan;
 
-      if (userId === currentUser.id) {
+        const { error } = await supabase.from("profiles").update(payload).eq("user_id", row.user_id);
+        if (error) throw error;
+      }
+
+      await loadAdminData();
+      setNotice("Korisnik je azuriran.");
+
+      if (row.user_id === currentUser.id && patch.role === "user") {
+        await onForceSignOut();
+      }
+    } catch (error) {
+      setNotice(error.message || "Nije moguce azurirati korisnika.");
+    } finally {
+      setBusyUserId("");
+    }
+  }
+
+  async function clearUserContent(row) {
+    const yes = window.confirm("Da li sigurno zelis da obrises sve linkove i analitiku ovog korisnika?");
+    if (!yes) return;
+
+    setBusyUserId(row.user_id);
+    setNotice("");
+    try {
+      if (useDemoMode) {
+        demoClearUserContentAsAdmin(row.user_id);
+      } else {
+        const { error: linksError } = await supabase.from("links").delete().eq("user_id", row.user_id);
+        if (linksError) throw linksError;
+        const { error: eventsError } = await supabase
+          .from("analytics_events")
+          .delete()
+          .eq("owner_user_id", row.user_id);
+        if (eventsError) throw eventsError;
+      }
+
+      await loadAdminData();
+      setNotice("Sadrzaj korisnika je obrisan.");
+    } catch (error) {
+      setNotice(error.message || "Nije moguce obrisati korisnicki sadrzaj.");
+    } finally {
+      setBusyUserId("");
+    }
+  }
+
+  async function deleteUser(row) {
+    const yes = window.confirm(
+      "Da li sigurno zelis da obrises korisnika, profil, linkove i analitiku?"
+    );
+    if (!yes) return;
+
+    setBusyUserId(row.user_id);
+    setNotice("");
+    try {
+      if (useDemoMode) {
+        demoDeleteUserAsAdmin(row.user_id);
+      } else {
+        const { error: linksError } = await supabase.from("links").delete().eq("user_id", row.user_id);
+        if (linksError) throw linksError;
+
+        const { error: eventsError } = await supabase
+          .from("analytics_events")
+          .delete()
+          .eq("owner_user_id", row.user_id);
+        if (eventsError) throw eventsError;
+
+        const { error: profileError } = await supabase.from("profiles").delete().eq("user_id", row.user_id);
+        if (profileError) throw profileError;
+      }
+
+      await loadAdminData();
+      setNotice("Korisnik je obrisan.");
+      if (row.user_id === currentUser.id) {
         await onForceSignOut();
       }
     } catch (error) {
       setNotice(error.message || "Nije moguce obrisati korisnika.");
     } finally {
-      setDeletingUserId("");
+      setBusyUserId("");
     }
   }
 
   const filteredRows = rows.filter((row) => {
     const needle = query.trim().toLowerCase();
     if (!needle) return true;
-    return [row.display_name, row.slug, row.email, row.user_id]
+    return [row.display_name, row.slug, row.email, row.user_id, row.role, row.status, row.plan]
       .join(" ")
       .toLowerCase()
       .includes(needle);
@@ -1200,7 +1686,7 @@ function AdminPage({ currentUser, useDemoMode, onForceSignOut }) {
 
   const totalUsers = rows.length;
   const totalLinks = rows.reduce((sum, row) => sum + row.links_count, 0);
-  const totalAdmins = rows.filter((row) => row.is_admin).length;
+  const totalAdmins = rows.filter((row) => row.role === "master_admin").length;
 
   if (loading) {
     return <CenterNotice title="Ucitavanje admin panela" message="Pripremam podatke..." />;
@@ -1212,8 +1698,8 @@ function AdminPage({ currentUser, useDemoMode, onForceSignOut }) {
         <section className="panel">
           <div className="panel-head">
             <div>
-              <p className="eyebrow">Admin</p>
-              <h2>Admin panel</h2>
+              <p className="eyebrow">Master Admin</p>
+              <h2>Kompletan admin panel</h2>
             </div>
             <div className="actions-inline">
               <Link className="btn btn-outline" to="/">
@@ -1235,8 +1721,23 @@ function AdminPage({ currentUser, useDemoMode, onForceSignOut }) {
               <span>Ukupno linkova</span>
             </article>
             <article className="stat-card">
-              <strong>{useDemoMode ? totalAdmins : "-"}</strong>
-              <span>Admin naloga</span>
+              <strong>{totalAdmins}</strong>
+              <span>Master admina</span>
+            </article>
+          </div>
+
+          <div className="admin-stats">
+            <article className="stat-card">
+              <strong>{globalAnalytics.views}</strong>
+              <span>Global pregledi</span>
+            </article>
+            <article className="stat-card">
+              <strong>{globalAnalytics.clicks}</strong>
+              <span>Global klikovi</span>
+            </article>
+            <article className="stat-card">
+              <strong>{globalAnalytics.ctr.toFixed(1)}%</strong>
+              <span>Global CTR</span>
             </article>
           </div>
 
@@ -1245,16 +1746,9 @@ function AdminPage({ currentUser, useDemoMode, onForceSignOut }) {
             <input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="Ime, slug, email ili user id"
+              placeholder="Ime, slug, email, plan, status..."
             />
           </label>
-
-          {!useDemoMode ? (
-            <p className="form-message">
-              Trenutno je ukljucen read-only admin pregled. Za brisanje ili menjanje drugih korisnika
-              potreban je serverski endpoint sa service-role privilegijama.
-            </p>
-          ) : null}
 
           <div className="admin-list">
             {filteredRows.length === 0 ? (
@@ -1264,12 +1758,16 @@ function AdminPage({ currentUser, useDemoMode, onForceSignOut }) {
                 <article className="link-editor-card" key={row.user_id}>
                   <div className="admin-row-head">
                     <strong>{row.display_name || "(bez imena)"}</strong>
-                    {row.is_admin ? <span className="admin-badge">ADMIN</span> : null}
+                    {row.role === "master_admin" ? <span className="admin-badge">MASTER ADMIN</span> : null}
                   </div>
-                  {row.email ? <p className="admin-meta">{row.email}</p> : null}
+                  <p className="admin-meta">Email: {row.email || "-"}</p>
                   <p className="admin-meta">Slug: {row.slug || "-"}</p>
+                  <p className="admin-meta">Status: {row.status}</p>
+                  <p className="admin-meta">Plan: {row.plan}</p>
+                  <p className="admin-meta">
+                    Analitika: {row.views} pregleda / {row.clicks} klikova ({row.ctr.toFixed(1)}% CTR)
+                  </p>
                   <p className="admin-meta">User ID: {row.user_id}</p>
-                  <p className="admin-meta">Broj linkova: {row.links_count}</p>
 
                   <div className="actions-inline">
                     {row.slug ? (
@@ -1277,16 +1775,63 @@ function AdminPage({ currentUser, useDemoMode, onForceSignOut }) {
                         Otvori javnu stranicu
                       </Link>
                     ) : null}
-                    {useDemoMode ? (
-                      <button
-                        type="button"
-                        className="btn btn-danger"
-                        disabled={deletingUserId === row.user_id}
-                        onClick={() => deleteUser(row.user_id)}
-                      >
-                        {deletingUserId === row.user_id ? "Brisem..." : "Obrisi korisnika"}
-                      </button>
-                    ) : null}
+
+                    <button
+                      type="button"
+                      className="btn btn-outline"
+                      disabled={busyUserId === row.user_id}
+                      onClick={() =>
+                        updateUserMeta(row, {
+                          role: row.role === "master_admin" ? "user" : "master_admin"
+                        })
+                      }
+                    >
+                      {row.role === "master_admin" ? "Skini admin" : "Postavi master admin"}
+                    </button>
+
+                    <button
+                      type="button"
+                      className="btn btn-outline"
+                      disabled={busyUserId === row.user_id}
+                      onClick={() =>
+                        updateUserMeta(row, {
+                          status: row.status === "active" ? "suspended" : "active"
+                        })
+                      }
+                    >
+                      {row.status === "active" ? "Suspenduj" : "Aktiviraj"}
+                    </button>
+
+                    <select
+                      className="select-inline"
+                      value={row.plan}
+                      onChange={(event) => updateUserMeta(row, { plan: event.target.value })}
+                      disabled={busyUserId === row.user_id}
+                    >
+                      {PLAN_OPTIONS.map((plan) => (
+                        <option key={plan} value={plan}>
+                          {plan}
+                        </option>
+                      ))}
+                    </select>
+
+                    <button
+                      type="button"
+                      className="btn btn-outline"
+                      disabled={busyUserId === row.user_id}
+                      onClick={() => clearUserContent(row)}
+                    >
+                      Reset sadrzaja
+                    </button>
+
+                    <button
+                      type="button"
+                      className="btn btn-danger"
+                      disabled={busyUserId === row.user_id}
+                      onClick={() => deleteUser(row)}
+                    >
+                      {busyUserId === row.user_id ? "Obrada..." : "Obrisi korisnika"}
+                    </button>
                   </div>
                 </article>
               ))
@@ -1326,13 +1871,14 @@ function PublicProfilePage({ useDemoMode }) {
 
       setProfile(payload.profile);
       setLinks(payload.links);
+      demoRecordProfileView(payload.profile.user_id, slug);
       setLoading(false);
       return;
     }
 
     const { data: profileRow, error: profileError } = await supabase
       .from("profiles")
-      .select("user_id, slug, display_name, bio, avatar_url")
+      .select("user_id, slug, display_name, bio, avatar_url, status")
       .eq("slug", slug)
       .maybeSingle();
 
@@ -1344,6 +1890,11 @@ function PublicProfilePage({ useDemoMode }) {
 
     if (!profileRow) {
       setError("Ova stranica ne postoji.");
+      setLoading(false);
+      return;
+    }
+    if (profileRow.status === "suspended") {
+      setError("Profil je trenutno suspendovan.");
       setLoading(false);
       return;
     }
@@ -1362,7 +1913,43 @@ function PublicProfilePage({ useDemoMode }) {
 
     setProfile(profileRow);
     setLinks(linkRows ?? []);
+
+    try {
+      await supabase.from("analytics_events").insert({
+        owner_user_id: profileRow.user_id,
+        link_id: null,
+        event_type: "view",
+        source_slug: slug,
+        referrer: document.referrer || "",
+        user_agent: navigator.userAgent || ""
+      });
+    } catch {
+      // Best-effort analytics
+    }
+
     setLoading(false);
+  }
+
+  async function trackLinkClick(linkId) {
+    if (!profile?.user_id || !linkId) return;
+
+    if (useDemoMode) {
+      demoRecordLinkClick(profile.user_id, linkId, slug);
+      return;
+    }
+
+    try {
+      await supabase.from("analytics_events").insert({
+        owner_user_id: profile.user_id,
+        link_id: linkId,
+        event_type: "click",
+        source_slug: slug,
+        referrer: document.referrer || "",
+        user_agent: navigator.userAgent || ""
+      });
+    } catch {
+      // Best-effort analytics
+    }
   }
 
   if (loading) {
@@ -1394,7 +1981,14 @@ function PublicProfilePage({ useDemoMode }) {
 
           <div className="public-links">
             {links.map((link) => (
-              <a key={link.id} className="public-link" href={link.url} target="_blank" rel="noreferrer">
+              <a
+                key={link.id}
+                className="public-link"
+                href={link.url}
+                target="_blank"
+                rel="noreferrer"
+                onClick={() => trackLinkClick(link.id)}
+              >
                 <span>
                   <strong>{link.title}</strong>
                   <small>{link.url}</small>

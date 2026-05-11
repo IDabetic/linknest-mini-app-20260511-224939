@@ -6,6 +6,7 @@ Ovo je pravi mini-SaaS:
 - korisnik uredjuje svoj profil i linkove
 - javna stranica je dostupna na `/u/{slug}`
 - admin panel je dostupan na `/admin`
+- analitika prati preglede profila i klikove na linkove
 
 ## Tech stack
 
@@ -31,6 +32,7 @@ npm run dev
 ```env
 VITE_SUPABASE_URL=...
 VITE_SUPABASE_ANON_KEY=...
+VITE_MASTER_ADMIN_EMAILS=admin@tvojdomen.com
 VITE_ADMIN_EMAILS=admin@tvojdomen.com,drugiadmin@tvojdomen.com
 ```
 
@@ -44,8 +46,18 @@ VITE_ADMIN_EMAILS=admin@tvojdomen.com,drugiadmin@tvojdomen.com
 - Public page (`/u/:slug`): prikaz profila i linkova
 - Admin page (`/admin`):
   - pregled svih korisnickih profila i broja linkova
+  - globalna i per-user analitika
+  - role/status/plan upravljanje korisnicima
+  - reset korisnickog sadrzaja (linkovi + analitika)
+  - brisanje korisnickog profila/sadrzaja
   - pretraga korisnika
-  - u demo rezimu i brisanje korisnika
+
+- Dashboard analitika (`/dashboard`):
+  - ukupan broj pregleda
+  - ukupan broj klikova
+  - CTR
+  - top linkovi
+  - dnevni pregled (7 dana)
 
 ## 4) Deploy na Vercel
 
@@ -59,3 +71,5 @@ VITE_ADMIN_EMAILS=admin@tvojdomen.com,drugiadmin@tvojdomen.com
 Ako je u Supabase ukljucen Email Confirmation, korisnik posle sign-up treba da potvrdi email pa tek onda login.
 
 Ako `VITE_SUPABASE_*` varijable nisu podesene, app radi u demo rezimu (podaci ostaju samo u browseru).
+
+`VITE_MASTER_ADMIN_EMAILS` odredjuje ko ima master admin pristup odmah po login-u.

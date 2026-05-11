@@ -196,6 +196,11 @@ code {
   gap: 12px;
 }
 
+h4 {
+  margin: 0;
+  font-family: "Fraunces", Georgia, serif;
+}
+
 label {
   display: grid;
   gap: 7px;
@@ -210,6 +215,16 @@ textarea {
   border-radius: 12px;
   padding: 12px 13px;
   font-size: 0.95rem;
+  font-family: inherit;
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.86);
+}
+
+select {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px 12px;
+  font-size: 0.9rem;
   font-family: inherit;
   color: var(--ink);
   background: rgba(255, 255, 255, 0.86);
@@ -350,6 +365,21 @@ textarea:focus {
   font-size: 0.86rem;
 }
 
+.select-inline {
+  min-width: 120px;
+}
+
+.analytics-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.analytics-list {
+  display: grid;
+  gap: 6px;
+}
+
 .public-shell {
   width: min(480px, 100%);
 }
@@ -458,6 +488,10 @@ textarea:focus {
   }
 
   .admin-stats {
+    grid-template-columns: 1fr;
+  }
+
+  .analytics-grid {
     grid-template-columns: 1fr;
   }
 }
