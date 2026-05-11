@@ -10,12 +10,263 @@ import {
 import { hasSupabaseEnv, supabase } from "./lib/supabase";
 import { isLikelyUrl, slugify, stripAtPrefix } from "./lib/utils";
 
+const DEMO_DB_KEY = "linknest_demo_v1";
+const DEMO_SESSION_KEY = "linknest_demo_session_v1";
+
+function readDemoDb() {
+  try {
+    const raw = localStorage.getItem(DEMO_DB_KEY);
+    if (!raw) {
+      return { users: [], profiles: [], links: [] };
+    }
+    const parsed = JSON.parse(raw);
+    return {
+      users: Array.isArray(parsed.users) ? parsed.users : [],
+      profiles: Array.isArray(parsed.profiles) ? parsed.profiles : [],
+      links: Array.isArray(parsed.links) ? parsed.links : []
+    };
+  } catch {
+    return { users: [], profiles: [], links: [] };
+  }
+}
+
+function writeDemoDb(db) {
+  localStorage.setItem(DEMO_DB_KEY, JSON.stringify(db));
+}
+
+function generateId() {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
+}
+
+function getUniqueSlug(baseSlug, profiles, excludeUserId = null) {
+  const base = slugify(baseSlug) || "creator";
+  let candidate = base;
+  let counter = 1;
+
+  while (profiles.some((profile) => profile.slug === candidate && profile.user_id !== excludeUserId)) {
+    candidate = `${base}-${counter}`;
+    counter += 1;
+  }
+
+  return candidate;
+}
+
+function demoGetSession() {
+  const userId = localStorage.getItem(DEMO_SESSION_KEY);
+  if (!userId) return null;
+
+  const db = readDemoDb();
+  const user = db.users.find((row) => row.id === userId);
+  if (!user) {
+    localStorage.removeItem(DEMO_SESSION_KEY);
+    return null;
+  }
+
+  return {
+    user: {
+      id: user.id,
+      email: user.email
+    }
+  };
+}
+
+function demoSignUp(email, password) {
+  const db = readDemoDb();
+  const cleanEmail = email.trim().toLowerCase();
+
+  if (db.users.some((user) => user.email === cleanEmail)) {
+    throw new Error("User already registered.");
+  }
+
+  const user = {
+    id: generateId(),
+    email: cleanEmail,
+    password
+  };
+
+  db.users.push(user);
+  writeDemoDb(db);
+  localStorage.setItem(DEMO_SESSION_KEY, user.id);
+
+  return {
+    user: {
+      id: user.id,
+      email: user.email
+    }
+  };
+}
+
+function demoSignIn(email, password) {
+  const db = readDemoDb();
+  const cleanEmail = email.trim().toLowerCase();
+
+  const user = db.users.find((row) => row.email === cleanEmail && row.password === password);
+  if (!user) {
+    throw new Error("Invalid login credentials.");
+  }
+
+  localStorage.setItem(DEMO_SESSION_KEY, user.id);
+
+  return {
+    user: {
+      id: user.id,
+      email: user.email
+    }
+  };
+}
+
+function demoSignOut() {
+  localStorage.removeItem(DEMO_SESSION_KEY);
+}
+
+function demoEnsureProfile(user) {
+  const db = readDemoDb();
+  const existing = db.profiles.find((profile) => profile.user_id === user.id);
+  if (existing) return existing;
+
+  const base = slugify(stripAtPrefix(user.email)) || "creator";
+  const profile = {
+    user_id: user.id,
+    slug: getUniqueSlug(base, db.profiles),
+    display_name: stripAtPrefix(user.email),
+    bio: "",
+    avatar_url: ""
+  };
+
+  db.profiles.push(profile);
+  writeDemoDb(db);
+  return profile;
+}
+
+function demoUpdateProfile(userId, payload) {
+  const db = readDemoDb();
+  const index = db.profiles.findIndex((profile) => profile.user_id === userId);
+
+  if (index === -1) {
+    throw new Error("Profile not found.");
+  }
+
+  const cleanSlug = slugify(payload.slug);
+  if (!cleanSlug) {
+    throw new Error("Slug is required.");
+  }
+
+  const taken = db.profiles.some((profile) => profile.slug === cleanSlug && profile.user_id !== userId);
+  if (taken) {
+    const error = new Error("That slug is already taken.");
+    error.code = "23505";
+    throw error;
+  }
+
+  const next = {
+    ...db.profiles[index],
+    slug: cleanSlug,
+    display_name: payload.display_name.trim(),
+    bio: payload.bio.trim(),
+    avatar_url: payload.avatar_url.trim()
+  };
+
+  db.profiles[index] = next;
+  writeDemoDb(db);
+  return next;
+}
+
+function demoListLinks(userId) {
+  const db = readDemoDb();
+  return db.links
+    .filter((link) => link.user_id === userId)
+    .sort((a, b) => a.position - b.position)
+    .map((link) => ({ ...link }));
+}
+
+function demoAddLink(userId) {
+  const db = readDemoDb();
+  const position = db.links.filter((link) => link.user_id === userId).length;
+
+  const row = {
+    id: generateId(),
+    user_id: userId,
+    title: "New Link",
+    url: "https://example.com",
+    tag: "",
+    position
+  };
+
+  db.links.push(row);
+  writeDemoDb(db);
+  return { ...row };
+}
+
+function demoUpdateLink(userId, linkId, payload) {
+  const db = readDemoDb();
+  const index = db.links.findIndex((link) => link.id === linkId && link.user_id === userId);
+
+  if (index === -1) {
+    throw new Error("Link not found.");
+  }
+
+  db.links[index] = {
+    ...db.links[index],
+    title: payload.title.trim(),
+    url: payload.url.trim(),
+    tag: payload.tag.trim()
+  };
+
+  writeDemoDb(db);
+  return { ...db.links[index] };
+}
+
+function demoDeleteLink(userId, linkId) {
+  const db = readDemoDb();
+  db.links = db.links.filter((link) => !(link.id === linkId && link.user_id === userId));
+
+  const remaining = db.links
+    .filter((link) => link.user_id === userId)
+    .sort((a, b) => a.position - b.position)
+    .map((link, index) => ({ ...link, position: index }));
+
+  db.links = db.links.filter((link) => link.user_id !== userId).concat(remaining);
+  writeDemoDb(db);
+}
+
+function demoSetLinkPositions(userId, rows) {
+  const db = readDemoDb();
+
+  const normalized = rows.map((row, index) => ({ ...row, position: index }));
+  const otherUsers = db.links.filter((link) => link.user_id !== userId);
+  db.links = otherUsers.concat(normalized);
+
+  writeDemoDb(db);
+  return normalized;
+}
+
+function demoGetPublicProfile(slug) {
+  const db = readDemoDb();
+  const profile = db.profiles.find((row) => row.slug === slug);
+  if (!profile) return null;
+
+  const links = db.links
+    .filter((link) => link.user_id === profile.user_id)
+    .sort((a, b) => a.position - b.position)
+    .map((link) => ({ ...link }));
+
+  return {
+    profile: { ...profile },
+    links
+  };
+}
+
 function App() {
+  const useDemoMode = !hasSupabaseEnv;
   const [session, setSession] = useState(null);
   const [booting, setBooting] = useState(true);
 
   useEffect(() => {
-    if (!hasSupabaseEnv || !supabase) {
+    if (useDemoMode) {
+      setSession(demoGetSession());
       setBooting(false);
       return;
     }
@@ -38,47 +289,57 @@ function App() {
       mounted = false;
       subscription.unsubscribe();
     };
-  }, []);
+  }, [useDemoMode]);
 
-  if (!hasSupabaseEnv) {
-    return <MissingConfigScreen />;
+  async function handleSignOut() {
+    if (useDemoMode) {
+      demoSignOut();
+      setSession(null);
+      return;
+    }
+
+    await supabase.auth.signOut();
+    setSession(null);
   }
 
   if (booting) {
-    return <CenterNotice title="Loading" message="Initializing session..." />;
+    return <CenterNotice title="Loading" message="Initializing app..." />;
   }
 
   return (
     <Routes>
-      <Route path="/" element={<LandingPage session={session} />} />
+      <Route
+        path="/"
+        element={
+          <LandingPage
+            session={session}
+            useDemoMode={useDemoMode}
+            onSessionChange={setSession}
+            onSignOut={handleSignOut}
+          />
+        }
+      />
       <Route
         path="/dashboard"
-        element={session ? <DashboardPage user={session.user} /> : <Navigate to="/" replace />}
+        element={
+          session ? (
+            <DashboardPage
+              user={session.user}
+              useDemoMode={useDemoMode}
+              onSignOut={handleSignOut}
+            />
+          ) : (
+            <Navigate to="/" replace />
+          )
+        }
       />
-      <Route path="/u/:slug" element={<PublicProfilePage />} />
+      <Route path="/u/:slug" element={<PublicProfilePage useDemoMode={useDemoMode} />} />
       <Route path="*" element={<NotFoundPage />} />
     </Routes>
   );
 }
 
-function MissingConfigScreen() {
-  return (
-    <div className="page">
-      <section className="panel panel-narrow">
-        <h1>LinkNest Setup</h1>
-        <p>
-          Missing environment variables. Add <code>VITE_SUPABASE_URL</code> and
-          <code> VITE_SUPABASE_ANON_KEY</code> to <code>.env.local</code>.
-        </p>
-        <p>
-          Then run the SQL from <code>supabase/schema.sql</code> in your Supabase project.
-        </p>
-      </section>
-    </div>
-  );
-}
-
-function LandingPage({ session }) {
+function LandingPage({ session, useDemoMode, onSessionChange, onSignOut }) {
   return (
     <div className="page">
       <div className="bg-orb bg-orb-a" aria-hidden="true" />
@@ -93,12 +354,20 @@ function LandingPage({ session }) {
             <code>/u/slug</code>.
           </p>
 
+          {useDemoMode ? (
+            <p className="form-message">
+              Demo mode is active. Data is stored in this browser until Supabase variables are set.
+            </p>
+          ) : null}
+
           {session ? (
             <div className="hero-actions">
               <Link className="btn btn-solid" to="/dashboard">
                 Open Dashboard
               </Link>
-              <SignOutButton />
+              <button className="btn btn-outline" type="button" onClick={onSignOut}>
+                Sign out
+              </button>
             </div>
           ) : (
             <div className="hero-points">
@@ -109,13 +378,15 @@ function LandingPage({ session }) {
           )}
         </section>
 
-        {!session && <AuthCard />}
+        {!session && (
+          <AuthCard useDemoMode={useDemoMode} onSessionChange={onSessionChange} />
+        )}
       </main>
     </div>
   );
 }
 
-function AuthCard() {
+function AuthCard({ useDemoMode, onSessionChange }) {
   const navigate = useNavigate();
   const [mode, setMode] = useState("signin");
   const [email, setEmail] = useState("");
@@ -137,6 +408,21 @@ function AuthCard() {
       return;
     }
 
+    if (useDemoMode) {
+      try {
+        const nextSession =
+          mode === "signup"
+            ? demoSignUp(cleanEmail, cleanPassword)
+            : demoSignIn(cleanEmail, cleanPassword);
+        onSessionChange(nextSession);
+        navigate("/dashboard");
+      } catch (error) {
+        setMessage(error.message || "Authentication failed.");
+      }
+      setLoading(false);
+      return;
+    }
+
     if (mode === "signup") {
       const { data, error } = await supabase.auth.signUp({
         email: cleanEmail,
@@ -150,6 +436,7 @@ function AuthCard() {
       }
 
       if (data.session) {
+        onSessionChange(data.session);
         navigate("/dashboard");
         setLoading(false);
         return;
@@ -160,7 +447,7 @@ function AuthCard() {
       return;
     }
 
-    const { error } = await supabase.auth.signInWithPassword({
+    const { data, error } = await supabase.auth.signInWithPassword({
       email: cleanEmail,
       password: cleanPassword
     });
@@ -171,6 +458,7 @@ function AuthCard() {
       return;
     }
 
+    onSessionChange(data.session ?? null);
     navigate("/dashboard");
     setLoading(false);
   }
@@ -227,23 +515,7 @@ function AuthCard() {
   );
 }
 
-function SignOutButton() {
-  const [loading, setLoading] = useState(false);
-
-  async function handleSignOut() {
-    setLoading(true);
-    await supabase.auth.signOut();
-    setLoading(false);
-  }
-
-  return (
-    <button className="btn btn-outline" type="button" onClick={handleSignOut} disabled={loading}>
-      {loading ? "Signing out..." : "Sign out"}
-    </button>
-  );
-}
-
-function DashboardPage({ user }) {
+function DashboardPage({ user, useDemoMode, onSignOut }) {
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState("");
   const [profile, setProfile] = useState({
@@ -264,9 +536,13 @@ function DashboardPage({ user }) {
   useEffect(() => {
     loadUserData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user.id]);
+  }, [user.id, useDemoMode]);
 
   async function ensureProfile() {
+    if (useDemoMode) {
+      return demoEnsureProfile(user);
+    }
+
     const { data: existing, error: existingError } = await supabase
       .from("profiles")
       .select("user_id, slug, display_name, bio, avatar_url")
@@ -317,17 +593,21 @@ function DashboardPage({ user }) {
         avatar_url: row.avatar_url ?? ""
       });
 
-      const { data: linkRows, error: linksError } = await supabase
-        .from("links")
-        .select("id, user_id, title, url, tag, position")
-        .eq("user_id", user.id)
-        .order("position", { ascending: true });
+      if (useDemoMode) {
+        setLinks(demoListLinks(user.id));
+      } else {
+        const { data: linkRows, error: linksError } = await supabase
+          .from("links")
+          .select("id, user_id, title, url, tag, position")
+          .eq("user_id", user.id)
+          .order("position", { ascending: true });
 
-      if (linksError) {
-        throw linksError;
+        if (linksError) {
+          throw linksError;
+        }
+
+        setLinks(linkRows ?? []);
       }
-
-      setLinks(linkRows ?? []);
     } catch (error) {
       setNotice(error.message || "Could not load dashboard data.");
     } finally {
@@ -354,52 +634,72 @@ function DashboardPage({ user }) {
       avatar_url: profile.avatar_url.trim()
     };
 
-    const { error } = await supabase
-      .from("profiles")
-      .update(payload)
-      .eq("user_id", user.id)
-      .select("user_id")
-      .single();
+    try {
+      if (useDemoMode) {
+        const next = demoUpdateProfile(user.id, payload);
+        setProfile({
+          slug: next.slug,
+          display_name: next.display_name,
+          bio: next.bio,
+          avatar_url: next.avatar_url
+        });
+      } else {
+        const { error } = await supabase
+          .from("profiles")
+          .update(payload)
+          .eq("user_id", user.id)
+          .select("user_id")
+          .single();
 
-    if (error) {
+        if (error) {
+          throw error;
+        }
+      }
+
+      setNotice("Profile saved.");
+    } catch (error) {
       if (error.code === "23505") {
         setNotice("That slug is already taken. Please pick another one.");
       } else {
-        setNotice(error.message);
+        setNotice(error.message || "Could not save profile.");
       }
+    } finally {
       setSavingProfile(false);
-      return;
     }
-
-    setProfile((prev) => ({ ...prev, ...payload }));
-    setNotice("Profile saved.");
-    setSavingProfile(false);
   }
 
   async function addLink() {
     setSavingLinks(true);
     setNotice("");
 
-    const { data, error } = await supabase
-      .from("links")
-      .insert({
-        user_id: user.id,
-        title: "New Link",
-        url: "https://example.com",
-        tag: "",
-        position: links.length
-      })
-      .select("id, user_id, title, url, tag, position")
-      .single();
+    try {
+      if (useDemoMode) {
+        const created = demoAddLink(user.id);
+        setLinks((prev) => [...prev, created]);
+      } else {
+        const { data, error } = await supabase
+          .from("links")
+          .insert({
+            user_id: user.id,
+            title: "New Link",
+            url: "https://example.com",
+            tag: "",
+            position: links.length
+          })
+          .select("id, user_id, title, url, tag, position")
+          .single();
 
-    if (error) {
-      setNotice(error.message);
+        if (error) {
+          throw error;
+        }
+
+        setLinks((prev) => [...prev, data]);
+      }
+    } catch (error) {
+      setNotice(error.message || "Could not add link.");
+    } finally {
       setSavingLinks(false);
-      return;
     }
-
-    setLinks((prev) => [...prev, data]);
-    setSavingLinks(false);
   }
 
   function updateLinkField(id, field, value) {
@@ -420,44 +720,59 @@ function DashboardPage({ user }) {
     setSavingLinks(true);
     setNotice("");
 
-    const { error } = await supabase
-      .from("links")
-      .update({
-        title: link.title.trim(),
-        url: link.url.trim(),
-        tag: link.tag.trim()
-      })
-      .eq("id", link.id)
-      .eq("user_id", user.id)
-      .select("id")
-      .single();
+    try {
+      if (useDemoMode) {
+        demoUpdateLink(user.id, link.id, link);
+      } else {
+        const { error } = await supabase
+          .from("links")
+          .update({
+            title: link.title.trim(),
+            url: link.url.trim(),
+            tag: link.tag.trim()
+          })
+          .eq("id", link.id)
+          .eq("user_id", user.id)
+          .select("id")
+          .single();
 
-    if (error) {
-      setNotice(error.message);
+        if (error) {
+          throw error;
+        }
+      }
+
+      setNotice("Link saved.");
+    } catch (error) {
+      setNotice(error.message || "Could not save link.");
+    } finally {
       setSavingLinks(false);
-      return;
     }
-
-    setNotice("Link saved.");
-    setSavingLinks(false);
   }
 
   async function deleteLink(id) {
     setSavingLinks(true);
     setNotice("");
 
-    const { error } = await supabase.from("links").delete().eq("id", id).eq("user_id", user.id);
+    try {
+      if (useDemoMode) {
+        demoDeleteLink(user.id, id);
+        setLinks(demoListLinks(user.id));
+      } else {
+        const { error } = await supabase.from("links").delete().eq("id", id).eq("user_id", user.id);
 
-    if (error) {
-      setNotice(error.message);
+        if (error) {
+          throw error;
+        }
+
+        const remaining = links.filter((link) => link.id !== id);
+        setLinks(remaining);
+        await normalizePositions(remaining);
+      }
+    } catch (error) {
+      setNotice(error.message || "Could not delete link.");
+    } finally {
       setSavingLinks(false);
-      return;
     }
-
-    const remaining = links.filter((link) => link.id !== id);
-    setLinks(remaining);
-    await normalizePositions(remaining);
-    setSavingLinks(false);
   }
 
   async function moveLink(index, direction) {
@@ -483,6 +798,12 @@ function DashboardPage({ user }) {
   }
 
   async function normalizePositions(rows) {
+    if (useDemoMode) {
+      const normalized = demoSetLinkPositions(user.id, rows);
+      setLinks(normalized);
+      return true;
+    }
+
     for (let i = 0; i < rows.length; i += 1) {
       const row = rows[i];
       const { error } = await supabase
@@ -528,7 +849,9 @@ function DashboardPage({ user }) {
               <Link className="btn btn-outline" to="/">
                 Home
               </Link>
-              <SignOutButton />
+              <button className="btn btn-outline" type="button" onClick={onSignOut}>
+                Sign out
+              </button>
             </div>
           </div>
 
@@ -678,7 +1001,7 @@ function DashboardPage({ user }) {
   );
 }
 
-function PublicProfilePage() {
+function PublicProfilePage({ useDemoMode }) {
   const { slug } = useParams();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -688,11 +1011,25 @@ function PublicProfilePage() {
   useEffect(() => {
     loadPublicPage();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [slug]);
+  }, [slug, useDemoMode]);
 
   async function loadPublicPage() {
     setLoading(true);
     setError("");
+
+    if (useDemoMode) {
+      const payload = demoGetPublicProfile(slug);
+      if (!payload) {
+        setError("This page does not exist.");
+        setLoading(false);
+        return;
+      }
+
+      setProfile(payload.profile);
+      setLinks(payload.links);
+      setLoading(false);
+      return;
+    }
 
     const { data: profileRow, error: profileError } = await supabase
       .from("profiles")
