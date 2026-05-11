@@ -1,38 +1,53 @@
-# LinkNest - Link in Bio Mini App
+# LinkNest SaaS (Multi-user Link in Bio)
 
-Brz, moderni `link-in-bio` template za male biznise i kreatore.
+Ovo je pravi mini-SaaS:
 
-## Sta dobijas
+- korisnik kreira nalog
+- korisnik uredjuje svoj profil i linkove
+- javna stranica je dostupna na `/u/{slug}`
 
-- Mobile-first dizajn
-- Jednostavno uredjivanje kroz `config/profile.json`
-- Share dugme (native share + copy fallback)
-- Lagane animacije i premium izgled
-- Spreman za deploy na Vercel
+## Tech stack
 
-## Lokalno pokretanje
+- React + Vite
+- Supabase Auth
+- Supabase Postgres + RLS
+- Vercel deploy
 
-Najlakse je da pokrenes static server:
+## 1) Pokretanje lokalno
 
 ```bash
-npx serve .
+npm install
+cp .env.example .env.local
+npm run dev
 ```
 
-## Kako menjas sadrzaj
+## 2) Supabase setup
 
-Uredi fajl:
+1. Kreiraj Supabase projekat.
+2. U SQL editor-u pokreni [supabase/schema.sql](/Users/idabetic/Documents/New%20project%207/supabase/schema.sql).
+3. U `.env.local` upisi:
 
-- `config/profile.json`
+```env
+VITE_SUPABASE_URL=...
+VITE_SUPABASE_ANON_KEY=...
+```
 
-Polja:
+## 3) Kako app radi
 
-- `name`, `handle`, `bio`, `avatar`, `updatedAt`
-- `links[]` sa `title`, `subtitle`, `url`, `tag`
+- Landing: registracija / login
+- Dashboard (`/dashboard`):
+  - display name, bio, avatar URL
+  - custom slug
+  - dodavanje/izmena/brisanje/reorder linkova
+- Public page (`/u/:slug`): prikaz profila i linkova
 
-## Deploy na Vercel
+## 4) Deploy na Vercel
 
-1. Push na GitHub repozitorijum
-2. U Vercel izaberi "Add New Project"
-3. Importuj repo i klikni Deploy
+- Push na GitHub
+- Import repo u Vercel
+- Dodaj env varijable iz `.env.local`
+- Deploy
 
-Za staticki sajt nije potreban poseban build setup.
+## Napomena
+
+Ako je u Supabase ukljucen Email Confirmation, korisnik posle sign-up treba da potvrdi email pa tek onda login.
