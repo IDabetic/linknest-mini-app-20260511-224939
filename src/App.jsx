@@ -20,12 +20,29 @@ const ADMIN_EMAILS = String(import.meta.env.VITE_ADMIN_EMAILS || "")
   .split(",")
   .map((email) => email.trim().toLowerCase())
   .filter(Boolean);
-const ALL_ADMIN_EMAILS = Array.from(new Set([...MASTER_ADMIN_EMAILS, ...ADMIN_EMAILS]));
 const PLAN_OPTIONS = ["free", "starter", "pro", "premium"];
+const PLAN_LINK_LIMITS = {
+  free: 5,
+  starter: 20,
+  pro: 100,
+  premium: Number.POSITIVE_INFINITY
+};
+const LIMITS = {
+  slug: 40,
+  displayName: 80,
+  bio: 280,
+  avatarUrl: 500,
+  linkTitle: 80,
+  linkUrl: 500,
+  linkTag: 24
+};
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || "";
+const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || "";
 
-function isConfiguredAdminEmail(email) {
+function isConfiguredMasterAdminEmail(email) {
   if (!email) return false;
-  return ALL_ADMIN_EMAILS.includes(String(email).toLowerCase());
+  const clean = String(email).toLowerCase();
+  return MASTER_ADMIN_EMAILS.includes(clean) || ADMIN_EMAILS.includes(clean);
 }
 
 function isSessionAdmin(session, useDemoMode) {
@@ -33,7 +50,7 @@ function isSessionAdmin(session, useDemoMode) {
   if (useDemoMode) {
     return session.user.role === "master_admin";
   }
-  return isConfiguredAdminEmail(session.user.email) || session.user.role === "master_admin";
+  return session.user.role === "master_admin";
 }
 
 function nowIso() {
@@ -146,6 +163,59 @@ function generateId() {
   return `${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
 }
 
+function clampText(value, maxLen) {
+  return String(value || "").trim().slice(0, maxLen);
+}
+
+function normalizePlan(value) {
+  return PLAN_OPTIONS.includes(value) ? value : "free";
+}
+
+async function hashDemoPassword(password) {
+  const raw = String(password || "");
+  if (!raw) return "";
+
+  try {
+    if (typeof crypto !== "undefined" && crypto.subtle) {
+      const bytes = new TextEncoder().encode(raw);
+      const digest = await crypto.subtle.digest("SHA-256", bytes);
+      const arr = Array.from(new Uint8Array(digest));
+      return arr.map((n) => n.toString(16).padStart(2, "0")).join("");
+    }
+  } catch {
+    // Fallback below
+  }
+
+  return raw;
+}
+
+function firePublicAnalyticsEvent(payload) {
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) return;
+
+  const safePayload = {
+    owner_user_id: payload.owner_user_id,
+    link_id: payload.link_id ?? null,
+    event_type: payload.event_type,
+    source_slug: clampText(payload.source_slug, 80),
+    referrer: clampText(payload.referrer, 500),
+    user_agent: clampText(payload.user_agent, 500)
+  };
+
+  fetch(`${SUPABASE_URL}/rest/v1/analytics_events`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+      Prefer: "return=minimal"
+    },
+    keepalive: true,
+    body: JSON.stringify(safePayload)
+  }).catch(() => {
+    // Ignore analytics network errors
+  });
+}
+
 function getUniqueSlug(baseSlug, profiles, excludeUserId = null) {
   const base = slugify(baseSlug) || "creator";
   let candidate = base;
@@ -181,7 +251,7 @@ function demoGetSession() {
   };
 }
 
-function demoSignUp(email, password) {
+async function demoSignUp(email, password) {
   const db = readDemoDb();
   const cleanEmail = email.trim().toLowerCase();
 
@@ -189,11 +259,12 @@ function demoSignUp(email, password) {
     throw new Error("Korisnik je vec registrovan.");
   }
 
-  const shouldBeMasterAdmin = db.users.length === 0 || isConfiguredAdminEmail(cleanEmail);
+  const passwordHash = await hashDemoPassword(password);
+  const shouldBeMasterAdmin = db.users.length === 0 || isConfiguredMasterAdminEmail(cleanEmail);
   const user = {
     id: generateId(),
     email: cleanEmail,
-    password,
+    password_hash: passwordHash,
     role: shouldBeMasterAdmin ? "master_admin" : "user",
     status: "active",
     plan: "free",
@@ -215,16 +286,27 @@ function demoSignUp(email, password) {
   };
 }
 
-function demoSignIn(email, password) {
+async function demoSignIn(email, password) {
   const db = readDemoDb();
   const cleanEmail = email.trim().toLowerCase();
+  const passwordHash = await hashDemoPassword(password);
 
-  const user = db.users.find((row) => row.email === cleanEmail && row.password === password);
+  const user = db.users.find((row) => {
+    if (row.email !== cleanEmail) return false;
+    if (row.password_hash) return row.password_hash === passwordHash;
+    return row.password === password;
+  });
   if (!user) {
     throw new Error("Neispravni podaci za prijavu.");
   }
   if (user.status === "suspended") {
     throw new Error("Nalog je suspendovan. Kontaktiraj administratora.");
+  }
+
+  if (!user.password_hash && user.password) {
+    user.password_hash = passwordHash;
+    delete user.password;
+    writeDemoDb(db);
   }
 
   localStorage.setItem(DEMO_SESSION_KEY, user.id);
@@ -448,9 +530,9 @@ function demoListAdminRows() {
       return {
         user_id: user.id,
         email: user.email,
-        role: user.role || "user",
-        status: user.status || "active",
-        plan: user.plan || "free",
+        role: user.role === "master_admin" ? "master_admin" : "user",
+        status: user.status === "suspended" ? "suspended" : "active",
+        plan: normalizePlan(user.plan),
         slug: profile?.slug || "",
         display_name: profile?.display_name || "",
         bio: profile?.bio || "",
@@ -559,7 +641,7 @@ function App() {
     if (!baseSession?.user) return null;
 
     const email = baseSession.user.email || "";
-    const fallbackRole = isConfiguredAdminEmail(email) ? "master_admin" : "user";
+    const fallbackRole = "user";
 
     try {
       const { data, error } = await supabase
@@ -644,6 +726,13 @@ function App() {
     setSession(null);
   }
 
+  async function refreshSession() {
+    if (useDemoMode || !supabase) return;
+    const { data } = await supabase.auth.getSession();
+    const enriched = await enrichSupabaseSession(data.session ?? null);
+    setSession(enriched);
+  }
+
   if (booting) {
     return <CenterNotice title="Ucitavanje" message="Pokrecem aplikaciju..." />;
   }
@@ -668,12 +757,17 @@ function App() {
         path="/dashboard"
         element={
           session ? (
-            <DashboardPage
-              user={session.user}
-              isAdmin={isAdmin}
-              useDemoMode={useDemoMode}
-              onSignOut={handleSignOut}
-            />
+            session.user.status === "suspended" && !isAdmin ? (
+              <SuspendedPage onSignOut={handleSignOut} />
+            ) : (
+              <DashboardPage
+                user={session.user}
+                isAdmin={isAdmin}
+                useDemoMode={useDemoMode}
+                onSignOut={handleSignOut}
+                onRefreshSession={refreshSession}
+              />
+            )
           ) : (
             <Navigate to="/" replace />
           )
@@ -688,6 +782,7 @@ function App() {
                 currentUser={session.user}
                 useDemoMode={useDemoMode}
                 onForceSignOut={handleSignOut}
+                onRefreshSession={refreshSession}
               />
             ) : (
               <Navigate to="/dashboard" replace />
@@ -782,8 +877,8 @@ function AuthCard({ useDemoMode, onSessionChange }) {
       try {
         const nextSession =
           mode === "signup"
-            ? demoSignUp(cleanEmail, cleanPassword)
-            : demoSignIn(cleanEmail, cleanPassword);
+            ? await demoSignUp(cleanEmail, cleanPassword)
+            : await demoSignIn(cleanEmail, cleanPassword);
         onSessionChange(nextSession);
         navigate("/dashboard");
       } catch (error) {
@@ -810,7 +905,7 @@ function AuthCard({ useDemoMode, onSessionChange }) {
           ...data.session,
           user: {
             ...data.session.user,
-            role: isConfiguredAdminEmail(cleanEmail) ? "master_admin" : "user",
+            role: "user",
             status: "active",
             plan: "free"
           }
@@ -842,7 +937,7 @@ function AuthCard({ useDemoMode, onSessionChange }) {
             ...data.session,
             user: {
               ...data.session.user,
-              role: isConfiguredAdminEmail(cleanEmail) ? "master_admin" : "user",
+              role: "user",
               status: "active",
               plan: "free"
             }
@@ -905,7 +1000,7 @@ function AuthCard({ useDemoMode, onSessionChange }) {
   );
 }
 
-function DashboardPage({ user, isAdmin, useDemoMode, onSignOut }) {
+function DashboardPage({ user, isAdmin, useDemoMode, onSignOut, onRefreshSession }) {
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState("");
   const [profile, setProfile] = useState({
@@ -954,7 +1049,7 @@ function DashboardPage({ user, isAdmin, useDemoMode, onSignOut }) {
 
     const base = slugify(stripAtPrefix(user.email)) || "creator";
     const fallbackSlug = `${base}-${user.id.slice(0, 6)}`;
-    const fallbackRole = isConfiguredAdminEmail(user.email) ? "master_admin" : "user";
+    const fallbackRole = "user";
 
     const { data: created, error: createError } = await supabase
       .from("profiles")
@@ -1011,29 +1106,45 @@ function DashboardPage({ user, isAdmin, useDemoMode, onSignOut }) {
         display_name: row.display_name ?? "",
         bio: row.bio ?? "",
         avatar_url: row.avatar_url ?? "",
-        role: row.role ?? (isConfiguredAdminEmail(user.email) ? "master_admin" : "user"),
-        status: row.status ?? "active",
-        plan: row.plan ?? "free"
+        role: row.role === "master_admin" ? "master_admin" : "user",
+        status: row.status === "suspended" ? "suspended" : "active",
+        plan: normalizePlan(row.plan)
       });
+
+      if (
+        !useDemoMode &&
+        (row.role !== user.role || row.status !== user.status || row.plan !== user.plan)
+      ) {
+        await onRefreshSession?.();
+      }
 
       if (useDemoMode) {
         const userLinks = demoListLinks(user.id);
         setLinks(userLinks);
         await refreshAnalytics(userLinks);
       } else {
-        const { data: linkRows, error: linksError } = await supabase
-          .from("links")
-          .select("id, user_id, title, url, tag, position")
-          .eq("user_id", user.id)
-          .order("position", { ascending: true });
+        const [linksRes, eventsRes] = await Promise.all([
+          supabase
+            .from("links")
+            .select("id, user_id, title, url, tag, position")
+            .eq("user_id", user.id)
+            .order("position", { ascending: true }),
+          supabase
+            .from("analytics_events")
+            .select("id, owner_user_id, link_id, event_type, created_at")
+            .eq("owner_user_id", user.id)
+        ]);
 
-        if (linksError) {
-          throw linksError;
+        if (linksRes.error) {
+          throw linksRes.error;
+        }
+        if (eventsRes.error) {
+          throw eventsRes.error;
         }
 
-        const safeLinks = linkRows ?? [];
+        const safeLinks = linksRes.data ?? [];
         setLinks(safeLinks);
-        await refreshAnalytics(safeLinks);
+        setAnalytics(buildAnalyticsSummary(eventsRes.data ?? [], safeLinks));
       }
     } catch (error) {
       setNotice(error.message || "Nije moguce ucitati dashboard podatke.");
@@ -1053,13 +1164,23 @@ function DashboardPage({ user, isAdmin, useDemoMode, onSignOut }) {
       setSavingProfile(false);
       return;
     }
+    if (cleanSlug.length > LIMITS.slug) {
+      setNotice(`Slug ne sme biti duzi od ${LIMITS.slug} karaktera.`);
+      setSavingProfile(false);
+      return;
+    }
 
     const payload = {
       slug: cleanSlug,
-      display_name: profile.display_name.trim(),
-      bio: profile.bio.trim(),
-      avatar_url: profile.avatar_url.trim()
+      display_name: clampText(profile.display_name, LIMITS.displayName),
+      bio: clampText(profile.bio, LIMITS.bio),
+      avatar_url: clampText(profile.avatar_url, LIMITS.avatarUrl)
     };
+    if (payload.avatar_url && !isLikelyUrl(payload.avatar_url)) {
+      setNotice("Avatar URL mora da pocinje sa http:// ili https://.");
+      setSavingProfile(false);
+      return;
+    }
 
     try {
       if (useDemoMode) {
@@ -1097,6 +1218,12 @@ function DashboardPage({ user, isAdmin, useDemoMode, onSignOut }) {
   }
 
   async function addLink() {
+    const maxLinks = PLAN_LINK_LIMITS[normalizePlan(profile.plan)];
+    if (links.length >= maxLinks) {
+      setNotice(`Dosegao si limit linkova za plan "${profile.plan}" (${maxLinks}).`);
+      return;
+    }
+
     setSavingLinks(true);
     setNotice("");
 
@@ -1139,12 +1266,16 @@ function DashboardPage({ user, isAdmin, useDemoMode, onSignOut }) {
   }
 
   async function saveLink(link) {
-    if (!link.title.trim()) {
+    const nextTitle = clampText(link.title, LIMITS.linkTitle);
+    const nextUrl = clampText(link.url, LIMITS.linkUrl);
+    const nextTag = clampText(link.tag, LIMITS.linkTag);
+
+    if (!nextTitle) {
       setNotice("Svaki link mora da ima naslov.");
       return;
     }
 
-    if (!isLikelyUrl(link.url)) {
+    if (!isLikelyUrl(nextUrl)) {
       setNotice("URL svakog linka mora da pocinje sa http:// ili https://.");
       return;
     }
@@ -1154,14 +1285,14 @@ function DashboardPage({ user, isAdmin, useDemoMode, onSignOut }) {
 
     try {
       if (useDemoMode) {
-        demoUpdateLink(user.id, link.id, link);
+        demoUpdateLink(user.id, link.id, { ...link, title: nextTitle, url: nextUrl, tag: nextTag });
       } else {
         const { error } = await supabase
           .from("links")
           .update({
-            title: link.title.trim(),
-            url: link.url.trim(),
-            tag: link.tag.trim()
+            title: nextTitle,
+            url: nextUrl,
+            tag: nextTag
           })
           .eq("id", link.id)
           .eq("user_id", user.id)
@@ -1173,6 +1304,11 @@ function DashboardPage({ user, isAdmin, useDemoMode, onSignOut }) {
         }
       }
 
+      setLinks((prev) =>
+        prev.map((item) =>
+          item.id === link.id ? { ...item, title: nextTitle, url: nextUrl, tag: nextTag } : item
+        )
+      );
       setNotice("Link je sacuvan.");
     } catch (error) {
       setNotice(error.message || "Nije moguce sacuvati link.");
@@ -1271,6 +1407,9 @@ function DashboardPage({ user, isAdmin, useDemoMode, onSignOut }) {
     return <CenterNotice title="Ucitavanje dashboard-a" message="Pripremam profil i linkove..." />;
   }
 
+  const maxLinks = PLAN_LINK_LIMITS[normalizePlan(profile.plan)];
+  const isAtPlanLimit = links.length >= maxLinks;
+
   return (
     <div className="page">
       <main className="layout dashboard-layout">
@@ -1362,10 +1501,22 @@ function DashboardPage({ user, isAdmin, useDemoMode, onSignOut }) {
         <section className="panel">
           <div className="panel-head">
             <h3>Linkovi</h3>
-            <button type="button" className="btn btn-solid" onClick={addLink} disabled={savingLinks}>
+            <button
+              type="button"
+              className="btn btn-solid"
+              onClick={addLink}
+              disabled={savingLinks || isAtPlanLimit}
+            >
               Dodaj link
             </button>
           </div>
+          {Number.isFinite(maxLinks) ? (
+            <p className="admin-meta">
+              Iskorisceno: {links.length} / {maxLinks} linkova za plan "{profile.plan}"
+            </p>
+          ) : (
+            <p className="admin-meta">Neograniceni linkovi za plan "{profile.plan}"</p>
+          )}
 
           {links.length === 0 ? (
             <p className="empty-state">Jos nemas linkove. Dodaj prvi.</p>
@@ -1494,7 +1645,7 @@ function DashboardPage({ user, isAdmin, useDemoMode, onSignOut }) {
   );
 }
 
-function AdminPage({ currentUser, useDemoMode, onForceSignOut }) {
+function AdminPage({ currentUser, useDemoMode, onForceSignOut, onRefreshSession }) {
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState("");
   const [query, setQuery] = useState("");
@@ -1522,19 +1673,18 @@ function AdminPage({ currentUser, useDemoMode, onForceSignOut }) {
         setRows(demoListAdminRows());
         setGlobalAnalytics(demoGetGlobalAnalytics());
       } else {
-        const { data: profiles, error: profilesError } = await supabase
-          .from("profiles")
-          .select("user_id, email, slug, display_name, bio, role, status, plan");
+        const [profilesRes, linksRes, eventsRes] = await Promise.all([
+          supabase.from("profiles").select("user_id, email, slug, display_name, bio, role, status, plan"),
+          supabase.from("links").select("id, user_id, title, url"),
+          supabase.from("analytics_events").select("id, owner_user_id, link_id, event_type, created_at")
+        ]);
 
-        if (profilesError) throw profilesError;
-
-        const { data: links, error: linksError } = await supabase.from("links").select("id, user_id, title, url");
-        if (linksError) throw linksError;
-
-        const { data: events, error: eventsError } = await supabase
-          .from("analytics_events")
-          .select("id, owner_user_id, link_id, event_type, created_at");
-        if (eventsError) throw eventsError;
+        const profiles = profilesRes.data;
+        const links = linksRes.data;
+        const events = eventsRes.data;
+        if (profilesRes.error) throw profilesRes.error;
+        if (linksRes.error) throw linksRes.error;
+        if (eventsRes.error) throw eventsRes.error;
 
         const linksByUserId = (links || []).reduce((acc, link) => {
           const key = link.user_id;
@@ -1557,9 +1707,9 @@ function AdminPage({ currentUser, useDemoMode, onForceSignOut }) {
             return {
               user_id: profile.user_id,
               email: profile.email || "",
-              role: profile.role || "user",
-              status: profile.status || "active",
-              plan: profile.plan || "free",
+              role: profile.role === "master_admin" ? "master_admin" : "user",
+              status: profile.status === "suspended" ? "suspended" : "active",
+              plan: normalizePlan(profile.plan),
               slug: profile.slug || "",
               display_name: profile.display_name || "",
               bio: profile.bio || "",
@@ -1582,6 +1732,14 @@ function AdminPage({ currentUser, useDemoMode, onForceSignOut }) {
   }
 
   async function updateUserMeta(row, patch) {
+    if (patch.role && row.role === "master_admin" && patch.role !== "master_admin") {
+      const currentMasterAdmins = rows.filter((item) => item.role === "master_admin").length;
+      if (currentMasterAdmins <= 1) {
+        setNotice("Mora postojati bar jedan master admin.");
+        return;
+      }
+    }
+
     setBusyUserId(row.user_id);
     setNotice("");
     try {
@@ -1600,8 +1758,11 @@ function AdminPage({ currentUser, useDemoMode, onForceSignOut }) {
       await loadAdminData();
       setNotice("Korisnik je azuriran.");
 
-      if (row.user_id === currentUser.id && patch.role === "user") {
-        await onForceSignOut();
+      if (row.user_id === currentUser.id) {
+        await onRefreshSession?.();
+        if (patch.role === "user" || patch.status === "suspended") {
+          await onForceSignOut();
+        }
       }
     } catch (error) {
       setNotice(error.message || "Nije moguce azurirati korisnika.");
@@ -1639,6 +1800,14 @@ function AdminPage({ currentUser, useDemoMode, onForceSignOut }) {
   }
 
   async function deleteUser(row) {
+    if (row.role === "master_admin") {
+      const currentMasterAdmins = rows.filter((item) => item.role === "master_admin").length;
+      if (currentMasterAdmins <= 1) {
+        setNotice("Ne mozes obrisati poslednjeg master admina.");
+        return;
+      }
+    }
+
     const yes = window.confirm(
       "Da li sigurno zelis da obrises korisnika, profil, linkove i analitiku?"
     );
@@ -1877,13 +2046,13 @@ function PublicProfilePage({ useDemoMode }) {
     }
 
     const { data: profileRow, error: profileError } = await supabase
-      .from("profiles")
-      .select("user_id, slug, display_name, bio, avatar_url, status")
+      .from("public_profiles")
+      .select("user_id, slug, display_name, bio, avatar_url")
       .eq("slug", slug)
       .maybeSingle();
 
     if (profileError) {
-      setError(profileError.message);
+      setError("Trenutno nije moguce otvoriti ovaj profil.");
       setLoading(false);
       return;
     }
@@ -1893,12 +2062,6 @@ function PublicProfilePage({ useDemoMode }) {
       setLoading(false);
       return;
     }
-    if (profileRow.status === "suspended") {
-      setError("Profil je trenutno suspendovan.");
-      setLoading(false);
-      return;
-    }
-
     const { data: linkRows, error: linkError } = await supabase
       .from("links")
       .select("id, title, url, tag, position")
@@ -1906,26 +2069,21 @@ function PublicProfilePage({ useDemoMode }) {
       .order("position", { ascending: true });
 
     if (linkError) {
-      setError(linkError.message);
+      setError("Trenutno nije moguce ucitati linkove.");
       setLoading(false);
       return;
     }
 
     setProfile(profileRow);
     setLinks(linkRows ?? []);
-
-    try {
-      await supabase.from("analytics_events").insert({
-        owner_user_id: profileRow.user_id,
-        link_id: null,
-        event_type: "view",
-        source_slug: slug,
-        referrer: document.referrer || "",
-        user_agent: navigator.userAgent || ""
-      });
-    } catch {
-      // Best-effort analytics
-    }
+    firePublicAnalyticsEvent({
+      owner_user_id: profileRow.user_id,
+      link_id: null,
+      event_type: "view",
+      source_slug: slug,
+      referrer: document.referrer || "",
+      user_agent: navigator.userAgent || ""
+    });
 
     setLoading(false);
   }
@@ -1938,18 +2096,14 @@ function PublicProfilePage({ useDemoMode }) {
       return;
     }
 
-    try {
-      await supabase.from("analytics_events").insert({
-        owner_user_id: profile.user_id,
-        link_id: linkId,
-        event_type: "click",
-        source_slug: slug,
-        referrer: document.referrer || "",
-        user_agent: navigator.userAgent || ""
-      });
-    } catch {
-      // Best-effort analytics
-    }
+    firePublicAnalyticsEvent({
+      owner_user_id: profile.user_id,
+      link_id: linkId,
+      event_type: "click",
+      source_slug: slug,
+      referrer: document.referrer || "",
+      user_agent: navigator.userAgent || ""
+    });
   }
 
   if (loading) {
@@ -2028,6 +2182,20 @@ function NotFoundPage() {
         <Link className="btn btn-outline" to="/">
           Idi na pocetnu
         </Link>
+      }
+    />
+  );
+}
+
+function SuspendedPage({ onSignOut }) {
+  return (
+    <CenterNotice
+      title="Nalog je suspendovan"
+      message="Trenutno nemas pristup dashboard-u. Kontaktiraj podrsku ili administratora."
+      footer={
+        <button className="btn btn-outline" type="button" onClick={onSignOut}>
+          Odjavi se
+        </button>
       }
     />
   );

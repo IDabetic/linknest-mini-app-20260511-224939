@@ -14,6 +14,11 @@ create table if not exists public.profiles (
   updated_at timestamptz not null default now()
 );
 
+create table if not exists public.master_admin_allowlist (
+  email text primary key,
+  created_at timestamptz not null default now()
+);
+
 alter table public.profiles add column if not exists email text not null default '';
 alter table public.profiles add column if not exists role text not null default 'user';
 alter table public.profiles add column if not exists status text not null default 'active';
@@ -44,6 +49,18 @@ create table if not exists public.analytics_events (
 create index if not exists links_user_id_position_idx on public.links (user_id, position);
 create index if not exists analytics_events_owner_idx on public.analytics_events (owner_user_id, created_at desc);
 create index if not exists analytics_events_link_idx on public.analytics_events (link_id, created_at desc);
+
+create or replace view public.public_profiles as
+select
+  user_id,
+  slug,
+  display_name,
+  bio,
+  avatar_url
+from public.profiles
+where status = 'active';
+
+grant select on public.public_profiles to anon, authenticated;
 
 -- Constraints (guarded so script can be rerun)
 do $$
@@ -91,6 +108,40 @@ language plpgsql
 as $$
 begin
   new.updated_at = now();
+  return new;
+end;
+$$;
+
+create or replace function public.normalize_profile_on_insert()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  auth_email text;
+begin
+  select u.email into auth_email
+  from auth.users u
+  where u.id = new.user_id;
+
+  new.email = lower(trim(coalesce(auth_email, new.email, '')));
+  new.display_name = left(trim(coalesce(new.display_name, '')), 80);
+  new.bio = left(trim(coalesce(new.bio, '')), 280);
+  new.avatar_url = left(trim(coalesce(new.avatar_url, '')), 500);
+  new.slug = left(trim(coalesce(new.slug, '')), 40);
+  new.status = 'active';
+  new.plan = 'free';
+  new.role = 'user';
+
+  if exists (
+    select 1
+    from public.master_admin_allowlist a
+    where lower(a.email) = new.email
+  ) then
+    new.role = 'master_admin';
+  end if;
+
   return new;
 end;
 $$;
@@ -146,6 +197,12 @@ before update on public.profiles
 for each row
 execute procedure public.touch_updated_at();
 
+drop trigger if exists trg_profiles_normalize_insert on public.profiles;
+create trigger trg_profiles_normalize_insert
+before insert on public.profiles
+for each row
+execute procedure public.normalize_profile_on_insert();
+
 drop trigger if exists trg_profiles_protect_sensitive on public.profiles;
 create trigger trg_profiles_protect_sensitive
 before update on public.profiles
@@ -168,8 +225,7 @@ create policy "Profiles select access"
 on public.profiles
 for select
 using (
-  status = 'active'
-  or (select auth.uid()) = user_id
+  (select auth.uid()) = user_id
   or (select public.is_master_admin())
 );
 
@@ -251,6 +307,15 @@ with check (
     from public.profiles p
     where p.user_id = owner_user_id
       and p.status = 'active'
+  )
+  and (
+    link_id is null
+    or exists (
+      select 1
+      from public.links l
+      where l.id = link_id
+        and l.user_id = owner_user_id
+    )
   )
 );
 

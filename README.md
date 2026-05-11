@@ -36,6 +36,14 @@ VITE_MASTER_ADMIN_EMAILS=admin@tvojdomen.com
 VITE_ADMIN_EMAILS=admin@tvojdomen.com,drugiadmin@tvojdomen.com
 ```
 
+4. Dodaj svoj email u master admin allowlist u Supabase SQL editoru:
+
+```sql
+insert into public.master_admin_allowlist (email)
+values ('tvoj@email.com')
+on conflict (email) do nothing;
+```
+
 ## 3) Kako app radi
 
 - Landing: registracija / login
@@ -72,4 +80,4 @@ Ako je u Supabase ukljucen Email Confirmation, korisnik posle sign-up treba da p
 
 Ako `VITE_SUPABASE_*` varijable nisu podesene, app radi u demo rezimu (podaci ostaju samo u browseru).
 
-`VITE_MASTER_ADMIN_EMAILS` odredjuje ko ima master admin pristup odmah po login-u.
+`VITE_MASTER_ADMIN_EMAILS` i `VITE_ADMIN_EMAILS` koriste se za demo rezim i bootstrap fallback. Prava u produkciji kontrolise baza (`master_admin_allowlist` + RLS).
