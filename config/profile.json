@@ -1,0 +1,39 @@
+{
+  "name": "Mina Studio",
+  "handle": "@minastudio",
+  "bio": "Web dizajn i content produkcija za male biznise. Brza isporuka, jasna komunikacija, merljivi rezultati.",
+  "avatar": "",
+  "updatedAt": "2026-05-11",
+  "links": [
+    {
+      "title": "Zakazi Besplatan Poziv",
+      "subtitle": "15 min strategija za tvoj biznis",
+      "url": "https://cal.com",
+      "tag": "Call"
+    },
+    {
+      "title": "Ponude i Paketi",
+      "subtitle": "Cene i scope usluga",
+      "url": "https://example.com/ponude",
+      "tag": "Offer"
+    },
+    {
+      "title": "Instagram",
+      "subtitle": "Najnoviji radovi i saveti",
+      "url": "https://instagram.com",
+      "tag": "Social"
+    },
+    {
+      "title": "WhatsApp",
+      "subtitle": "Brz kontakt za upite",
+      "url": "https://wa.me/381600000000",
+      "tag": "Chat"
+    },
+    {
+      "title": "Newsletter",
+      "subtitle": "Praktični growth saveti 1x nedeljno",
+      "url": "https://example.com/newsletter",
+      "tag": "New"
+    }
+  ]
+}
