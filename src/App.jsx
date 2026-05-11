@@ -78,7 +78,7 @@ function demoSignUp(email, password) {
   const cleanEmail = email.trim().toLowerCase();
 
   if (db.users.some((user) => user.email === cleanEmail)) {
-    throw new Error("User already registered.");
+    throw new Error("Korisnik je vec registrovan.");
   }
 
   const user = {
@@ -105,7 +105,7 @@ function demoSignIn(email, password) {
 
   const user = db.users.find((row) => row.email === cleanEmail && row.password === password);
   if (!user) {
-    throw new Error("Invalid login credentials.");
+    throw new Error("Neispravni podaci za prijavu.");
   }
 
   localStorage.setItem(DEMO_SESSION_KEY, user.id);
@@ -146,17 +146,17 @@ function demoUpdateProfile(userId, payload) {
   const index = db.profiles.findIndex((profile) => profile.user_id === userId);
 
   if (index === -1) {
-    throw new Error("Profile not found.");
+    throw new Error("Profil nije pronadjen.");
   }
 
   const cleanSlug = slugify(payload.slug);
   if (!cleanSlug) {
-    throw new Error("Slug is required.");
+    throw new Error("Slug je obavezan.");
   }
 
   const taken = db.profiles.some((profile) => profile.slug === cleanSlug && profile.user_id !== userId);
   if (taken) {
-    const error = new Error("That slug is already taken.");
+    const error = new Error("Taj slug je vec zauzet.");
     error.code = "23505";
     throw error;
   }
@@ -189,7 +189,7 @@ function demoAddLink(userId) {
   const row = {
     id: generateId(),
     user_id: userId,
-    title: "New Link",
+    title: "Novi link",
     url: "https://example.com",
     tag: "",
     position
@@ -205,7 +205,7 @@ function demoUpdateLink(userId, linkId, payload) {
   const index = db.links.findIndex((link) => link.id === linkId && link.user_id === userId);
 
   if (index === -1) {
-    throw new Error("Link not found.");
+    throw new Error("Link nije pronadjen.");
   }
 
   db.links[index] = {
@@ -303,7 +303,7 @@ function App() {
   }
 
   if (booting) {
-    return <CenterNotice title="Loading" message="Initializing app..." />;
+    return <CenterNotice title="Ucitavanje" message="Pokrecem aplikaciju..." />;
   }
 
   return (
@@ -348,32 +348,33 @@ function LandingPage({ session, useDemoMode, onSessionChange, onSignOut }) {
       <main className="layout">
         <section className="hero panel">
           <p className="eyebrow">Link-in-bio SaaS</p>
-          <h1>Users create their own profile pages in minutes.</h1>
+          <h1>Korisnici mogu da naprave svoju profil stranicu za par minuta.</h1>
           <p>
-            LinkNest gives each user an account, a dashboard, and a public URL in the format
+            LinkNest svakom korisniku daje nalog, dashboard i javni URL u formatu
             <code>/u/slug</code>.
           </p>
 
           {useDemoMode ? (
             <p className="form-message">
-              Demo mode is active. Data is stored in this browser until Supabase variables are set.
+              Demo rezim je aktivan. Podaci se cuvaju u ovom browseru dok ne podesimo Supabase
+              varijable.
             </p>
           ) : null}
 
           {session ? (
             <div className="hero-actions">
               <Link className="btn btn-solid" to="/dashboard">
-                Open Dashboard
+                Otvori dashboard
               </Link>
               <button className="btn btn-outline" type="button" onClick={onSignOut}>
-                Sign out
+                Odjavi se
               </button>
             </div>
           ) : (
             <div className="hero-points">
-              <span>Auth + profiles</span>
-              <span>Link manager</span>
-              <span>Public pages</span>
+              <span>Nalog + profili</span>
+              <span>Uredjivanje linkova</span>
+              <span>Javne stranice</span>
             </div>
           )}
         </section>
@@ -404,7 +405,7 @@ function AuthCard({ useDemoMode, onSessionChange }) {
 
     if (!cleanEmail || !cleanPassword) {
       setLoading(false);
-      setMessage("Email and password are required.");
+      setMessage("Email i lozinka su obavezni.");
       return;
     }
 
@@ -417,7 +418,7 @@ function AuthCard({ useDemoMode, onSessionChange }) {
         onSessionChange(nextSession);
         navigate("/dashboard");
       } catch (error) {
-        setMessage(error.message || "Authentication failed.");
+        setMessage(error.message || "Prijava nije uspela.");
       }
       setLoading(false);
       return;
@@ -442,7 +443,7 @@ function AuthCard({ useDemoMode, onSessionChange }) {
         return;
       }
 
-      setMessage("Check your inbox and confirm your email before signing in.");
+      setMessage("Proveri email i potvrdi nalog pre prijave.");
       setLoading(false);
       return;
     }
@@ -471,42 +472,42 @@ function AuthCard({ useDemoMode, onSessionChange }) {
           className={mode === "signin" ? "tab active" : "tab"}
           onClick={() => setMode("signin")}
         >
-          Sign in
+          Prijava
         </button>
         <button
           type="button"
           className={mode === "signup" ? "tab active" : "tab"}
           onClick={() => setMode("signup")}
         >
-          Create account
+          Kreiraj nalog
         </button>
       </div>
 
       <form className="auth-form" onSubmit={handleSubmit}>
         <label>
-          Email
+          Email adresa
           <input
             type="email"
             autoComplete="email"
             value={email}
             onChange={(event) => setEmail(event.target.value)}
-            placeholder="you@business.com"
+            placeholder="ti@biznis.com"
           />
         </label>
 
         <label>
-          Password
+          Lozinka
           <input
             type="password"
             autoComplete={mode === "signin" ? "current-password" : "new-password"}
             value={password}
             onChange={(event) => setPassword(event.target.value)}
-            placeholder="At least 8 characters"
+            placeholder="Najmanje 8 karaktera"
           />
         </label>
 
         <button type="submit" className="btn btn-solid" disabled={loading}>
-          {loading ? "Please wait..." : mode === "signin" ? "Sign in" : "Create account"}
+          {loading ? "Sacekaj..." : mode === "signin" ? "Prijava" : "Kreiraj nalog"}
         </button>
 
         {message ? <p className="form-message">{message}</p> : null}
@@ -609,7 +610,7 @@ function DashboardPage({ user, useDemoMode, onSignOut }) {
         setLinks(linkRows ?? []);
       }
     } catch (error) {
-      setNotice(error.message || "Could not load dashboard data.");
+      setNotice(error.message || "Nije moguce ucitati dashboard podatke.");
     } finally {
       setLoading(false);
     }
@@ -622,7 +623,7 @@ function DashboardPage({ user, useDemoMode, onSignOut }) {
 
     const cleanSlug = slugify(profile.slug);
     if (!cleanSlug) {
-      setNotice("Slug is required and can only contain letters, numbers and dashes.");
+      setNotice("Slug je obavezan i sme da sadrzi samo slova, brojeve i crtice.");
       setSavingProfile(false);
       return;
     }
@@ -656,12 +657,12 @@ function DashboardPage({ user, useDemoMode, onSignOut }) {
         }
       }
 
-      setNotice("Profile saved.");
+      setNotice("Profil je sacuvan.");
     } catch (error) {
       if (error.code === "23505") {
-        setNotice("That slug is already taken. Please pick another one.");
+        setNotice("Taj slug je vec zauzet. Izaberi drugi.");
       } else {
-        setNotice(error.message || "Could not save profile.");
+        setNotice(error.message || "Nije moguce sacuvati profil.");
       }
     } finally {
       setSavingProfile(false);
@@ -681,7 +682,7 @@ function DashboardPage({ user, useDemoMode, onSignOut }) {
           .from("links")
           .insert({
             user_id: user.id,
-            title: "New Link",
+            title: "Novi link",
             url: "https://example.com",
             tag: "",
             position: links.length
@@ -696,7 +697,7 @@ function DashboardPage({ user, useDemoMode, onSignOut }) {
         setLinks((prev) => [...prev, data]);
       }
     } catch (error) {
-      setNotice(error.message || "Could not add link.");
+      setNotice(error.message || "Nije moguce dodati link.");
     } finally {
       setSavingLinks(false);
     }
@@ -708,12 +709,12 @@ function DashboardPage({ user, useDemoMode, onSignOut }) {
 
   async function saveLink(link) {
     if (!link.title.trim()) {
-      setNotice("Each link needs a title.");
+      setNotice("Svaki link mora da ima naslov.");
       return;
     }
 
     if (!isLikelyUrl(link.url)) {
-      setNotice("Each link URL must start with http:// or https://.");
+      setNotice("URL svakog linka mora da pocinje sa http:// ili https://.");
       return;
     }
 
@@ -741,9 +742,9 @@ function DashboardPage({ user, useDemoMode, onSignOut }) {
         }
       }
 
-      setNotice("Link saved.");
+      setNotice("Link je sacuvan.");
     } catch (error) {
-      setNotice(error.message || "Could not save link.");
+      setNotice(error.message || "Nije moguce sacuvati link.");
     } finally {
       setSavingLinks(false);
     }
@@ -769,7 +770,7 @@ function DashboardPage({ user, useDemoMode, onSignOut }) {
         await normalizePositions(remaining);
       }
     } catch (error) {
-      setNotice(error.message || "Could not delete link.");
+      setNotice(error.message || "Nije moguce obrisati link.");
     } finally {
       setSavingLinks(false);
     }
@@ -791,7 +792,7 @@ function DashboardPage({ user, useDemoMode, onSignOut }) {
     const success = await normalizePositions(reordered);
     if (!success) {
       await loadUserData();
-      setNotice("Could not reorder links. Data was reloaded.");
+      setNotice("Nije moguce promeniti redosled linkova. Podaci su ponovo ucitani.");
     }
 
     setSavingLinks(false);
@@ -826,14 +827,14 @@ function DashboardPage({ user, useDemoMode, onSignOut }) {
 
     try {
       await navigator.clipboard.writeText(publicPage);
-      setNotice("Public URL copied.");
+      setNotice("Javni URL je kopiran.");
     } catch {
       setNotice(publicPage);
     }
   }
 
   if (loading) {
-    return <CenterNotice title="Loading dashboard" message="Preparing profile and links..." />;
+    return <CenterNotice title="Ucitavanje dashboard-a" message="Pripremam profil i linkove..." />;
   }
 
   return (
@@ -843,32 +844,32 @@ function DashboardPage({ user, useDemoMode, onSignOut }) {
           <div className="panel-head">
             <div>
               <p className="eyebrow">Dashboard</p>
-              <h2>Your Link-in-Bio</h2>
+              <h2>Tvoj Link-in-Bio</h2>
             </div>
             <div className="actions-inline">
               <Link className="btn btn-outline" to="/">
-                Home
+                Pocetna
               </Link>
               <button className="btn btn-outline" type="button" onClick={onSignOut}>
-                Sign out
+                Odjavi se
               </button>
             </div>
           </div>
 
           <form className="profile-form" onSubmit={saveProfile}>
             <label>
-              Display name
+              Prikazano ime
               <input
                 value={profile.display_name}
                 onChange={(event) =>
                   setProfile((prev) => ({ ...prev, display_name: event.target.value }))
                 }
-                placeholder="Your brand name"
+                placeholder="Ime brenda"
               />
             </label>
 
             <label>
-              Public slug
+              Javni slug
               <input
                 value={profile.slug}
                 onChange={(event) => setProfile((prev) => ({ ...prev, slug: event.target.value }))}
@@ -877,17 +878,17 @@ function DashboardPage({ user, useDemoMode, onSignOut }) {
             </label>
 
             <label>
-              Bio
+              Opis
               <textarea
                 rows="3"
                 value={profile.bio}
                 onChange={(event) => setProfile((prev) => ({ ...prev, bio: event.target.value }))}
-                placeholder="One short sentence about what you do"
+                placeholder="Jedna kratka recenica o tome cime se bavis"
               />
             </label>
 
             <label>
-              Avatar URL (optional)
+              Avatar URL (opciono)
               <input
                 value={profile.avatar_url}
                 onChange={(event) =>
@@ -899,16 +900,16 @@ function DashboardPage({ user, useDemoMode, onSignOut }) {
 
             <div className="actions-inline">
               <button type="submit" className="btn btn-solid" disabled={savingProfile}>
-                {savingProfile ? "Saving..." : "Save profile"}
+                {savingProfile ? "Cuvam..." : "Sacuvaj profil"}
               </button>
 
               {publicPage ? (
                 <>
                   <a className="btn btn-outline" href={publicPage} target="_blank" rel="noreferrer">
-                    Open public page
+                    Otvori javnu stranicu
                   </a>
                   <button type="button" className="btn btn-outline" onClick={copyPublicLink}>
-                    Copy URL
+                    Kopiraj URL
                   </button>
                 </>
               ) : null}
@@ -918,20 +919,20 @@ function DashboardPage({ user, useDemoMode, onSignOut }) {
 
         <section className="panel">
           <div className="panel-head">
-            <h3>Links</h3>
+            <h3>Linkovi</h3>
             <button type="button" className="btn btn-solid" onClick={addLink} disabled={savingLinks}>
-              Add link
+              Dodaj link
             </button>
           </div>
 
           {links.length === 0 ? (
-            <p className="empty-state">No links yet. Add your first one.</p>
+            <p className="empty-state">Jos nemas linkove. Dodaj prvi.</p>
           ) : (
             <div className="link-editor-list">
               {links.map((link, index) => (
                 <article key={link.id} className="link-editor-card">
                   <label>
-                    Title
+                    Naslov
                     <input
                       value={link.title}
                       onChange={(event) => updateLinkField(link.id, "title", event.target.value)}
@@ -947,11 +948,11 @@ function DashboardPage({ user, useDemoMode, onSignOut }) {
                   </label>
 
                   <label>
-                    Tag
+                    Oznaka
                     <input
                       value={link.tag || ""}
                       onChange={(event) => updateLinkField(link.id, "tag", event.target.value)}
-                      placeholder="Optional"
+                      placeholder="Opciono"
                     />
                   </label>
 
@@ -962,7 +963,7 @@ function DashboardPage({ user, useDemoMode, onSignOut }) {
                       disabled={index === 0 || savingLinks}
                       onClick={() => moveLink(index, -1)}
                     >
-                      Up
+                      Gore
                     </button>
                     <button
                       type="button"
@@ -970,7 +971,7 @@ function DashboardPage({ user, useDemoMode, onSignOut }) {
                       disabled={index === links.length - 1 || savingLinks}
                       onClick={() => moveLink(index, 1)}
                     >
-                      Down
+                      Dole
                     </button>
                     <button
                       type="button"
@@ -978,7 +979,7 @@ function DashboardPage({ user, useDemoMode, onSignOut }) {
                       disabled={savingLinks}
                       onClick={() => saveLink(link)}
                     >
-                      Save
+                      Sacuvaj
                     </button>
                     <button
                       type="button"
@@ -986,7 +987,7 @@ function DashboardPage({ user, useDemoMode, onSignOut }) {
                       disabled={savingLinks}
                       onClick={() => deleteLink(link.id)}
                     >
-                      Delete
+                      Obrisi
                     </button>
                   </div>
                 </article>
@@ -1020,7 +1021,7 @@ function PublicProfilePage({ useDemoMode }) {
     if (useDemoMode) {
       const payload = demoGetPublicProfile(slug);
       if (!payload) {
-        setError("This page does not exist.");
+        setError("Ova stranica ne postoji.");
         setLoading(false);
         return;
       }
@@ -1044,7 +1045,7 @@ function PublicProfilePage({ useDemoMode }) {
     }
 
     if (!profileRow) {
-      setError("This page does not exist.");
+      setError("Ova stranica ne postoji.");
       setLoading(false);
       return;
     }
@@ -1067,17 +1068,17 @@ function PublicProfilePage({ useDemoMode }) {
   }
 
   if (loading) {
-    return <CenterNotice title="Loading" message="Opening public profile..." />;
+    return <CenterNotice title="Ucitavanje" message="Otvaram javni profil..." />;
   }
 
   if (error) {
     return (
       <CenterNotice
-        title="Public Profile"
+        title="Javni profil"
         message={error}
         footer={
           <Link className="btn btn-outline" to="/">
-            Back home
+            Nazad na pocetnu
           </Link>
         }
       />
@@ -1089,7 +1090,7 @@ function PublicProfilePage({ useDemoMode }) {
       <main className="public-shell">
         <section className="panel public-card">
           <Avatar title={profile.display_name} avatarUrl={profile.avatar_url} />
-          <h1>{profile.display_name || "Untitled profile"}</h1>
+          <h1>{profile.display_name || "Profil bez naziva"}</h1>
           <p className="handle">@{profile.slug}</p>
           {profile.bio ? <p className="public-bio">{profile.bio}</p> : null}
 
@@ -1111,7 +1112,7 @@ function PublicProfilePage({ useDemoMode }) {
 }
 
 function Avatar({ title, avatarUrl }) {
-  const initials = (title || "User")
+  const initials = (title || "Korisnik")
     .split(" ")
     .map((part) => part[0])
     .filter(Boolean)
@@ -1129,11 +1130,11 @@ function Avatar({ title, avatarUrl }) {
 function NotFoundPage() {
   return (
     <CenterNotice
-      title="Not Found"
-      message="This route does not exist."
+      title="Nije pronadjeno"
+      message="Ova ruta ne postoji."
       footer={
         <Link className="btn btn-outline" to="/">
-          Go home
+          Idi na pocetnu
         </Link>
       }
     />
